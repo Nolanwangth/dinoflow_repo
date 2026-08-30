@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+
+# Local data, models, and runs
+data/
+datasets/
+models/
+outputs/
+checkpoints/
+wandb/
+*.safetensors
+*.pth
+*.pt
+*.ckpt
+
+# Logs and local configuration
+*.log
+.env
+.DS_Store

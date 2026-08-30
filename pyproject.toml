@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=71", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dinoflow"
+version = "0.1.0"
+description = "DINOv3-conditioned flow-matching policy for robot action chunks"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.7,<2.12",
+    "torchvision>=0.22,<0.27",
+    "numpy>=2.0,<2.3",
+    "opencv-python-headless>=4.9,<4.14",
+    "Pillow>=10,<13",
+    "einops>=0.8,<0.9",
+    "draccus==0.10.0",
+    "huggingface-hub>=1,<2",
+    "requests>=2.32,<3",
+    "gymnasium>=1.1,<2",
+    "safetensors>=0.4,<1",
+    "packaging>=24,<26",
+    "termcolor>=2.4,<4",
+    "tqdm>=4.66,<5",
+    "setuptools>=71,<81",
+    "datasets>=4.7,<5",
+    "pandas>=2,<4",
+    "pyarrow>=21,<30",
+    "torchcodec>=0.3,<0.12",
+    "jsonlines>=4,<5",
+    "accelerate>=1.10,<2",
+    "transformers>=5.4,<5.6",
+    "wandb>=0.24,<0.25",
+    "ujson>=5.8,<6",
+]
+
+[project.scripts]
+dinoflow-train = "lerobot.scripts.lerobot_train:main"
+
+[tool.setuptools.package-data]
+lerobot = [
+    "envs/*.json",
+    "templates/*.md",
+    "datasets/*.md",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
