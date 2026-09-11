@@ -31,6 +31,7 @@ from .configuration_dino_flow import DinoFlowConfig
 @ProcessorStepRegistry.register(name="dino_flow_slice_features")
 class SliceDinoFlowFeaturesStep(ProcessorStep):
     state_dim: int = 26
+    observation_state_dim: int = 646
     action_dim: int = 26
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
@@ -38,7 +39,7 @@ class SliceDinoFlowFeaturesStep(ProcessorStep):
         observation = new_transition.get(TransitionKey.OBSERVATION.value)
         if observation is not None and OBS_STATE in observation:
             observation = dict(observation)
-            observation[OBS_STATE] = observation[OBS_STATE][..., : self.state_dim]
+            observation[OBS_STATE] = observation[OBS_STATE][..., : self.observation_state_dim]
             new_transition[TransitionKey.OBSERVATION.value] = observation
         action = new_transition.get(TransitionKey.ACTION.value)
         if action is not None:
@@ -49,7 +50,9 @@ class SliceDinoFlowFeaturesStep(ProcessorStep):
         transformed = deepcopy(features)
         if OBS_STATE in transformed.get(PipelineFeatureType.OBSERVATION, {}):
             ft = transformed[PipelineFeatureType.OBSERVATION][OBS_STATE]
-            transformed[PipelineFeatureType.OBSERVATION][OBS_STATE] = PolicyFeature(ft.type, (self.state_dim,))
+            transformed[PipelineFeatureType.OBSERVATION][OBS_STATE] = PolicyFeature(
+                ft.type, (self.observation_state_dim,)
+            )
         if ACTION in transformed.get(PipelineFeatureType.ACTION, {}):
             ft = transformed[PipelineFeatureType.ACTION][ACTION]
             transformed[PipelineFeatureType.ACTION][ACTION] = PolicyFeature(ft.type, (self.action_dim,))
@@ -58,7 +61,7 @@ class SliceDinoFlowFeaturesStep(ProcessorStep):
 
 def _active_features(config: DinoFlowConfig) -> dict[str, PolicyFeature]:
     features = dict(config.input_features)
-    features[OBS_STATE] = PolicyFeature(FeatureType.STATE, (config.state_dim,))
+    features[OBS_STATE] = PolicyFeature(FeatureType.STATE, (config.observation_state_dim,))
     return features
 
 
@@ -70,7 +73,9 @@ def _slice_stats(dataset_stats: dict[str, dict[str, Any]] | None, config: DinoFl
     if dataset_stats is None:
         return None
     stats = deepcopy(dataset_stats)
-    for key, dim in ((OBS_STATE, config.state_dim), (ACTION, config.action_dim)):
+    # Keep the complete observation.state statistics: the policy extracts the
+    # first 26 joint values and the force/tactile suffix separately.
+    for key, dim in ((ACTION, config.action_dim),):
         if key in stats:
             for stat_name, value in list(stats[key].items()):
                 if isinstance(value, torch.Tensor):
@@ -89,7 +94,11 @@ def make_dino_flow_pre_post_processors(
     stats = _slice_stats(dataset_stats, config)
     pre_steps = [
         RenameObservationsProcessorStep(rename_map={}),
-        SliceDinoFlowFeaturesStep(config.state_dim, config.action_dim),
+        SliceDinoFlowFeaturesStep(
+            state_dim=config.state_dim,
+            observation_state_dim=config.observation_state_dim,
+            action_dim=config.action_dim,
+        ),
         AddBatchDimensionProcessorStep(),
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(

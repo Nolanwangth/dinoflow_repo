@@ -22,14 +22,17 @@ way via ``notify_observation``.
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import time
 import traceback
+from collections import deque
 from threading import Event, Lock, Thread
 from typing import Any
 
 import torch
+import numpy as np
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.rtc import ActionQueue, LatencyTracker, reanchor_relative_rtc_prefix
@@ -41,6 +44,7 @@ from lerobot.processor import (
     RelativeActionsProcessorStep,
 )
 from lerobot.utils.feature_utils import build_dataset_frame
+from lerobot.utils.constants import OBS_STATE
 
 from ..robot_wrapper import ThreadSafeRobot
 from .base import InferenceEngine
@@ -118,6 +122,9 @@ class RTCInferenceEngine(InferenceEngine):
         self._use_torch_compile = use_torch_compile
         self._compile_warmup_inferences = compile_warmup_inferences
         self._rtc_queue_threshold = rtc_queue_threshold
+        self._history_steps = int(getattr(policy.config, "tactile_history_steps", 1))
+        self.requires_observation_history = self._history_steps > 1
+        self._observation_history = deque(maxlen=max(1, self._history_steps))
 
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
@@ -184,6 +191,7 @@ class RTCInferenceEngine(InferenceEngine):
             "obs": None,
             "robot_type": self._robot.robot_type,
         }
+        self._observation_history.clear()
         self._shutdown_event.clear()
         self._rtc_thread = Thread(
             target=self._rtc_loop,
@@ -222,6 +230,7 @@ class RTCInferenceEngine(InferenceEngine):
         self._policy.reset()
         self._preprocessor.reset()
         self._postprocessor.reset()
+        self._observation_history.clear()
         if self._action_queue is not None:
             self._action_queue.clear()
 
@@ -238,7 +247,33 @@ class RTCInferenceEngine(InferenceEngine):
     def notify_observation(self, obs: dict) -> None:
         """Publish the latest observation for the RTC thread to consume."""
         with self._obs_lock:
+            if self.requires_observation_history:
+                self._observation_history.append(copy.deepcopy(obs))
             self._obs_holder["obs"] = obs
+
+    def _build_observation_frame(self, obs: dict) -> dict:
+        """Build the current frame and attach the causal force/tactile history."""
+        frame = build_dataset_frame(self._hw_features, obs, prefix="observation")
+        if not self.requires_observation_history or OBS_STATE not in frame:
+            return frame
+
+        with self._obs_lock:
+            history = list(self._observation_history)
+        state_history = []
+        for historical_obs in history:
+            historical_frame = build_dataset_frame(
+                self._hw_features, historical_obs, prefix="observation"
+            )
+            if OBS_STATE in historical_frame:
+                state_history.append(np.asarray(historical_frame[OBS_STATE], dtype=np.float32))
+        if not state_history:
+            return frame
+        if len(state_history) < self._history_steps:
+            state_history = [state_history[0]] * (self._history_steps - len(state_history)) + state_history
+        # Keep an explicit policy batch dimension.  The rollout frame normally
+        # contains one state vector, while this policy consumes [B,T,D].
+        frame[OBS_STATE] = np.stack(state_history[-self._history_steps :], axis=0)[None]
+        return frame
 
     # ------------------------------------------------------------------
     # RTC: background inference thread
@@ -276,7 +311,7 @@ class RTCInferenceEngine(InferenceEngine):
                         latency = latency_tracker.max()
                         delay = math.ceil(latency / time_per_chunk) if latency else 0
 
-                        obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
+                        obs_batch = self._build_observation_frame(obs)
                         obs_batch = prepare_observation_for_inference(
                             obs_batch, policy_device, self._task, self._robot.robot_type
                         )

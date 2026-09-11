@@ -21,6 +21,15 @@ class DinoFlowConfig(PreTrainedConfig):
 
     state_dim: int = 26
     action_dim: int = 26
+    # The dataset stores joints, wrist wrench, and all tactile cells in one
+    # observation.state vector.  The policy uses only state_dim joints as the
+    # action reference and parses the remaining values below for contact history.
+    observation_state_dim: int = 646
+    wrist_force_dim: int = 12
+    tactile_state_offset: int = 42
+    tactile_dim: int = 604
+    tactile_history_steps: int = 6
+    tactile_active_threshold: float = -0.95
 
     vision_encoder_name: str = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
     vision_encoder_dim: int = 384
@@ -95,6 +104,12 @@ class DinoFlowConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         if self.state_dim <= 0 or self.action_dim <= 0:
             raise ValueError("state_dim and action_dim must be positive")
+        if self.observation_state_dim < self.tactile_state_offset + self.tactile_dim:
+            raise ValueError(
+                "observation_state_dim must contain all configured force and tactile values"
+            )
+        if self.wrist_force_dim <= 0 or self.tactile_dim <= 0 or self.tactile_history_steps <= 0:
+            raise ValueError("wrist_force_dim, tactile_dim, and tactile_history_steps must be positive")
         if self.horizon <= 0:
             raise ValueError("horizon must be positive")
         if self.n_action_steps <= 0 or self.n_action_steps > self.horizon:
@@ -138,8 +153,10 @@ class DinoFlowConfig(PreTrainedConfig):
             return
         state = self.robot_state_feature
         action = self.action_feature
-        if state is None or state.shape[0] < self.state_dim:
-            raise ValueError(f"DinoFlow requires at least {self.state_dim} state values, got {state}")
+        if state is None or state.shape[0] < self.observation_state_dim:
+            raise ValueError(
+                f"DinoFlow requires at least {self.observation_state_dim} observation.state values, got {state}"
+            )
         if action is None or action.shape[0] < self.action_dim:
             raise ValueError(f"DinoFlow requires at least {self.action_dim} action values, got {action}")
         missing = [key for key in self.image_resize_shapes if key not in self.image_features]
@@ -153,6 +170,11 @@ class DinoFlowConfig(PreTrainedConfig):
     @property
     def observation_delta_indices(self) -> list[int]:
         return [0]
+
+    @property
+    def contact_history_delta_indices(self) -> list[int]:
+        """Six observations ending at the current frame, at the dataset FPS."""
+        return list(range(-(self.tactile_history_steps - 1), 1))
 
     @property
     def action_delta_indices(self) -> list[int]:

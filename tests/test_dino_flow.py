@@ -2,7 +2,12 @@ import torch
 from torch import nn
 
 from lerobot.policies.dino_flow.configuration_dino_flow import DinoFlowConfig
-from lerobot.policies.dino_flow.modeling_dino_flow import ActionDiT, DinoFlowPolicy, DinoVisionEncoder
+from lerobot.policies.dino_flow.modeling_dino_flow import (
+    ActionDiT,
+    ContactHistoryEncoder,
+    DinoFlowPolicy,
+    DinoVisionEncoder,
+)
 
 
 def _small_config() -> DinoFlowConfig:
@@ -32,6 +37,29 @@ def test_default_camera_targets_preserve_wrist_width():
     assert config.image_resize_shapes["observation.images.base_0_rgb"] == (480, 768)
     assert config.image_resize_shapes["observation.images.left_wrist_0_rgb"] == (480, 832)
     assert config.image_resize_shapes["observation.images.right_wrist_0_rgb"] == (480, 832)
+
+
+def test_contact_history_layout_and_output():
+    config = DinoFlowConfig()
+    assert config.contact_history_delta_indices == [-5, -4, -3, -2, -1, 0]
+    encoder = ContactHistoryEncoder(config)
+    state_history = torch.randn(2, config.tactile_history_steps, config.observation_state_dim)
+    output = encoder(state_history)
+    assert output.shape == (2, 128)
+    assert torch.isfinite(output).all()
+
+
+def test_contact_history_is_causal_and_trainable():
+    config = DinoFlowConfig()
+    encoder = ContactHistoryEncoder(config)
+    state_history = torch.zeros(1, config.tactile_history_steps, config.observation_state_dim)
+    state_history[:, -1, config.tactile_state_offset] = 1.0
+    first = encoder(state_history)
+    state_history[:, 0, config.tactile_state_offset] = 100.0
+    second = encoder(state_history)
+    assert not torch.equal(first, second)
+    second.sum().backward()
+    assert any(param.grad is not None for param in encoder.parameters())
 
 
 def test_wrist_preprocess_center_crops_only_eight_pixels_each_side():

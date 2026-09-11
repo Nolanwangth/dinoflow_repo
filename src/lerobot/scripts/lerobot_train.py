@@ -209,7 +209,8 @@ def evaluate_validation_split(
         loss_acc += float(loss.detach().float().mean())
 
         # (b) action-prediction eval in fp32.
-        state_norm = unwrapped._current_state(batch).float()           # [B, D] normalized
+        state_history_norm = unwrapped._state_history(batch).float()
+        state_norm = state_history_norm[:, -1, :action_dim]             # [B, D] normalized joints
         action_norm = batch[ACTION][..., :action_dim].float()          # [B, H, D] normalized
         pred_norm = unwrapped.predict_action_chunk(batch)              # [B, H, D] normalized absolute
         pred_raw = normalizer._normalize_action(pred_norm.float(), inverse=True).float().cpu()
@@ -222,7 +223,9 @@ def evaluate_validation_split(
         n_all += (pred_raw - gt_raw).numel()
 
         # (c) copy-state baseline: current joints as the step-0 prediction.
-        obs_raw = normalizer._normalize_observation({OBS_STATE: state_norm}, inverse=True)
+        obs_raw = normalizer._normalize_observation(
+            {OBS_STATE: state_history_norm[:, -1]}, inverse=True
+        )
         state_raw = obs_raw[OBS_STATE].float().cpu()
         base_err0 = state_raw[:, :action_dim] - gt_raw[:, 0]
         base_sq_err0 += (base_err0**2).sum().item()

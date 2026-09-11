@@ -276,10 +276,12 @@ def build_rollout_context(
     # ``observation_features`` values are either a tuple (camera shape) or the
     # ``float`` type itself used as a sentinel for scalar motor features —
     # see ``dict[str, type | tuple]`` annotation on ``Robot.observation_features``.
+    include_all_scalar_observations = getattr(policy_config, "type", None) == "dino_flow"
     observation_features_hw = {
         k: v
         for k, v in all_obs_features.items()
-        if isinstance(v, tuple) or (v is float and k.endswith(".pos"))
+        if isinstance(v, tuple)
+        or (v is float and (include_all_scalar_observations or k.endswith(".pos")))
     }
     action_features_hw = {k: v for k, v in robot.action_features.items() if k.endswith(".pos")}
 

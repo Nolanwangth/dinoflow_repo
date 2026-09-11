@@ -48,7 +48,7 @@ Usage examples
         --strategy.type=base \\
         --policy.path=lerobot/pi0_base \\
         --inference.type=rtc \\
-        --inference.rtc.execution_horizon=10 \\
+        --inference.rtc.execution_horizon=20 \\
         --inference.rtc.max_guidance_weight=10.0 \\
         --robot.type=so100_follower \\
         --robot.port=/dev/ttyACM0 \\
@@ -92,7 +92,7 @@ Usage examples
         --strategy.record_autonomous=true \\
         --strategy.num_episodes=50 \\
         --inference.type=rtc \\
-        --inference.rtc.execution_horizon=10 \\
+        --inference.rtc.execution_horizon=20 \\
         --policy.path=user/my_pi0_policy \\
         --robot.type=so100_follower \\
         --robot.port=/dev/ttyACM0 \\

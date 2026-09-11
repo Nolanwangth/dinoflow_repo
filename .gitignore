@@ -8,12 +8,12 @@ __pycache__/
 .venv/
 
 # Local data, models, and runs
-data/
-datasets/
-models/
-outputs/
-checkpoints/
-wandb/
+/data/
+/datasets/
+/models/
+/outputs/
+/checkpoints/
+/wandb/
 *.safetensors
 *.pth
 *.pt

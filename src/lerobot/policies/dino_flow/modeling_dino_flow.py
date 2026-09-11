@@ -193,6 +193,98 @@ class DinoVisionEncoder(nn.Module):
         return outputs
 
 
+class TactileRegionEncoder(nn.Module):
+    """Shared encoder for the twelve tactile regions on the two hands."""
+
+    # l/r thumb, index, middle, ring, pinky, and palm.  The state vector keeps
+    # this order, with one complete hand followed by the other.
+    REGION_SHAPES = ((5, 7), (5, 12), (5, 12), (5, 12), (4, 8), (5, 11)) * 2
+
+    def __init__(self, config: DinoFlowConfig):
+        super().__init__()
+        region_size = sum(height * width for height, width in self.REGION_SHAPES)
+        if region_size != config.tactile_dim:
+            raise ValueError(
+                f"Configured tactile_dim={config.tactile_dim} does not match the 12-region layout ({region_size})"
+            )
+        self.region_encoder = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.AdaptiveAvgPool2d((2, 2)),
+            nn.Flatten(),
+            nn.Linear(32 * 2 * 2, 32),
+        )
+        self.active_threshold = config.tactile_active_threshold
+        self.history_steps = config.tactile_history_steps
+
+    def forward(self, tactile: Tensor) -> Tensor:
+        """Encode ``[B, history, 604]`` without per-frame standardization."""
+        if tactile.ndim != 3:
+            raise ValueError(f"Expected tactile history [B,T,D], got {tuple(tactile.shape)}")
+        batch, history, width = tactile.shape
+        if width != sum(height * width for height, width in self.REGION_SHAPES):
+            raise ValueError(f"Expected {sum(h * w for h, w in self.REGION_SHAPES)} tactile values, got {width}")
+
+        features = []
+        offset = 0
+        for height, region_width in self.REGION_SHAPES:
+            size = height * region_width
+            region = tactile[..., offset : offset + size].reshape(
+                batch * history, 1, height, region_width
+            )
+            encoded = self.region_encoder(region).reshape(batch, history, 32)
+            # The first statistic is the mean value, the second captures a
+            # local peak, and the ratio tracks how much of the pad is active.
+            raw_region = region.reshape(batch, history, size)
+            stats = torch.stack(
+                [
+                    raw_region.mean(dim=-1),
+                    raw_region.amax(dim=-1),
+                    (raw_region > self.active_threshold).to(raw_region.dtype).mean(dim=-1),
+                ],
+                dim=-1,
+            )
+            features.append(torch.cat([encoded, stats], dim=-1))
+            offset += size
+
+        frame_features = torch.cat(features, dim=-1)
+        if frame_features.shape[-1] != 12 * (32 + 3):
+            raise RuntimeError(f"Unexpected tactile feature width: {frame_features.shape[-1]}")
+        return frame_features
+
+
+class ContactHistoryEncoder(nn.Module):
+    """Fuse six frames of tactile regions and two wrist wrenches."""
+
+    def __init__(self, config: DinoFlowConfig):
+        super().__init__()
+        self.force_in = nn.Sequential(nn.Linear(config.wrist_force_dim, 32), nn.SiLU())
+        self.tactile_in = TactileRegionEncoder(config)
+        frame_dim = 32 + 12 * (32 + 3)
+        self.history_in = nn.Sequential(
+            nn.Linear(config.tactile_history_steps * frame_dim, 256),
+            nn.SiLU(),
+            nn.Linear(256, 128),
+        )
+        self.force_offset = config.tactile_state_offset - config.wrist_force_dim
+        self.tactile_offset = config.tactile_state_offset
+        self.force_end = config.tactile_state_offset
+        self.tactile_dim = config.tactile_dim
+        self.history_steps = config.tactile_history_steps
+
+    def forward(self, state_history: Tensor) -> Tensor:
+        if state_history.ndim != 3:
+            raise ValueError(f"Expected state history [B,T,D], got {tuple(state_history.shape)}")
+        force = state_history[..., self.force_offset : self.force_end]
+        tactile = state_history[..., self.tactile_offset : self.tactile_offset + self.tactile_dim]
+        force_features = self.force_in(force)
+        tactile_features = self.tactile_in(tactile)
+        frame_features = torch.cat([force_features, tactile_features], dim=-1)
+        return self.history_in(frame_features.reshape(state_history.shape[0], -1))
+
+
 class ActionDiTBlock(nn.Module):
     def __init__(self, dim: int, heads: int, dropout: float):
         super().__init__()
@@ -246,6 +338,9 @@ class ActionDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(config.hidden_dim, config.hidden_dim),
         )
+        self.contact_in = nn.Linear(128, config.hidden_dim)
+        nn.init.zeros_(self.contact_in.weight)
+        nn.init.zeros_(self.contact_in.bias)
         self.action_pos = nn.Parameter(torch.randn(1, config.horizon, config.hidden_dim) * 0.02)
         self.blocks = nn.ModuleList(
             [
@@ -263,6 +358,7 @@ class ActionDiT(nn.Module):
         visual_tokens: Tensor,
         visual_valid_mask: Tensor,
         t: Tensor,
+        contact_features: Tensor | None = None,
     ) -> Tensor:
         state_expanded = state[:, None, :].expand(-1, noisy_action.shape[1], -1)
         action_input = torch.cat([noisy_action, state_expanded], dim=-1)
@@ -276,6 +372,8 @@ class ActionDiT(nn.Module):
             dim=1,
         )
         time_emb = self.time_in(t)
+        if contact_features is not None:
+            time_emb = time_emb + self.contact_in(contact_features)
         for block in self.blocks:
             action_tokens = block(action_tokens, condition, condition_key_padding_mask, time_emb)
         return self.action_out(self.norm(action_tokens))
@@ -292,6 +390,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         # factory, so validate again on the normal policy creation path.
         self.config.validate_features()
         self.vision = DinoVisionEncoder(config)
+        self.contact_encoder = ContactHistoryEncoder(config)
         self.camera_keys = list(config.image_resize_shapes)
         self.visual_projection = nn.Linear(config.vision_encoder_dim, config.hidden_dim)
         self.action_model = ActionDiT(config)
@@ -323,11 +422,19 @@ class DinoFlowPolicy(PreTrainedPolicy):
     def reset(self):
         self._action_queue.clear()
 
-    def _current_state(self, batch: dict[str, Tensor]) -> Tensor:
+    def _state_history(self, batch: dict[str, Tensor]) -> Tensor:
         state = batch[OBS_STATE]
-        if state.ndim == 3:
-            state = state[:, -1]
-        return state[..., : self.config.state_dim]
+        if state.ndim == 2:
+            state = state[:, None]
+        if state.ndim != 3:
+            raise ValueError(f"Expected observation.state [B,T,D] or [B,D], got {tuple(state.shape)}")
+        if state.shape[1] < self.config.tactile_history_steps:
+            pad = state[:, :1].expand(-1, self.config.tactile_history_steps - state.shape[1], -1)
+            state = torch.cat([pad, state], dim=1)
+        return state[:, -self.config.tactile_history_steps :]
+
+    def _current_state(self, batch: dict[str, Tensor]) -> Tensor:
+        return self._state_history(batch)[:, -1, : self.config.state_dim]
 
     def _current_images(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
         encoded = self.vision({key: batch[key] for key in self.camera_keys})
@@ -335,15 +442,33 @@ class DinoFlowPolicy(PreTrainedPolicy):
         valid_mask = torch.cat([encoded[key][1] for key in self.camera_keys], dim=1)
         return self.visual_projection(patch_tokens), valid_mask
 
-    def _condition(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor]:
+    def _contact_features(self, batch: dict[str, Tensor]) -> Tensor:
+        state_history = self._state_history(batch)
+        required = self.config.tactile_state_offset + self.config.tactile_dim
+        if state_history.shape[-1] < required:
+            # Keep small synthetic/unit-test configurations usable; real
+            # DinoFlow training fails loudly at dataset validation instead.
+            return torch.zeros(
+                (state_history.shape[0], 128), device=state_history.device, dtype=state_history.dtype
+            )
+        return self.contact_encoder(state_history)
+
+    def _condition(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         state = self._current_state(batch)
         visual_tokens, visual_valid_mask = self._current_images(batch)
-        return state, visual_tokens, visual_valid_mask
+        contact_features = self._contact_features(batch)
+        return state, visual_tokens, visual_valid_mask, contact_features
 
     def _predict_velocity(
-        self, x: Tensor, t: Tensor, state: Tensor, visual_tokens: Tensor, visual_valid_mask: Tensor
+        self,
+        x: Tensor,
+        t: Tensor,
+        state: Tensor,
+        visual_tokens: Tensor,
+        visual_valid_mask: Tensor,
+        contact_features: Tensor,
     ) -> Tensor:
-        return self.action_model(x, state, visual_tokens, visual_valid_mask, t)
+        return self.action_model(x, state, visual_tokens, visual_valid_mask, t, contact_features)
 
     def _flow_loss(
         self,
@@ -351,6 +476,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         state: Tensor,
         visual_tokens: Tensor,
         visual_valid_mask: Tensor,
+        contact_features: Tensor,
     ) -> Tensor:
         target = batch[ACTION][..., : self.config.action_dim]
         if target.ndim == 2:
@@ -367,7 +493,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         t_view = t[:, None, None]
         x_t = (1 - t_view) * noise + t_view * target
         target_velocity = target - noise
-        pred = self._predict_velocity(x_t, t, state, visual_tokens, visual_valid_mask)
+        pred = self._predict_velocity(x_t, t, state, visual_tokens, visual_valid_mask, contact_features)
         loss = F.mse_loss(pred, target_velocity, reduction="none")
         if self.config.do_mask_loss_for_padding and "action_is_pad" in batch:
             action_is_pad = batch["action_is_pad"]
@@ -442,9 +568,9 @@ class DinoFlowPolicy(PreTrainedPolicy):
         batch: dict[str, Tensor],
         prev_chunk_left_over: Tensor | None = None,
         inference_delay: int = 0,
-        execution_horizon: int = 10,
+        execution_horizon: int = 20,
     ) -> Tensor:
-        state, visual_tokens, visual_valid_mask = self._condition(batch)
+        state, visual_tokens, visual_valid_mask, contact_features = self._condition(batch)
         dtype = next(self.action_model.parameters()).dtype
         noise_shape = (state.shape[0], self.config.horizon, self.config.action_dim)
         noise_key = (noise_shape, str(state.device), dtype)
@@ -468,7 +594,9 @@ class DinoFlowPolicy(PreTrainedPolicy):
         dt = 1.0 / steps
         for i in range(steps):
             t = torch.full((state.shape[0],), i / steps, device=state.device, dtype=dtype)
-            velocity = self._predict_velocity(x, t, state, visual_tokens, visual_valid_mask)
+            velocity = self._predict_velocity(
+                x, t, state, visual_tokens, visual_valid_mask, contact_features
+            )
             velocity = self._rtc_velocity(
                 x, velocity, t, prev_chunk_left_over, inference_delay, execution_horizon
             )
@@ -476,7 +604,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
                 x_euler = x + dt * velocity
                 t_next = torch.full((state.shape[0],), (i + 1) / steps, device=state.device, dtype=dtype)
                 velocity_next = self._predict_velocity(
-                    x_euler, t_next, state, visual_tokens, visual_valid_mask
+                    x_euler, t_next, state, visual_tokens, visual_valid_mask, contact_features
                 )
                 velocity_next = self._rtc_velocity(
                     x_euler, velocity_next, t_next, prev_chunk_left_over,
@@ -507,9 +635,9 @@ class DinoFlowPolicy(PreTrainedPolicy):
             batch,
             prev_chunk_left_over=kwargs.get("prev_chunk_left_over"),
             inference_delay=int(kwargs.get("inference_delay", 0) or 0),
-            execution_horizon=int(kwargs.get("execution_horizon", 10) or 10),
+            execution_horizon=int(kwargs.get("execution_horizon", 20) or 20),
         )
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict | None]:
-        state, visual_tokens, visual_valid_mask = self._condition(batch)
-        return self._flow_loss(batch, state, visual_tokens, visual_valid_mask), None
+        state, visual_tokens, visual_valid_mask, contact_features = self._condition(batch)
+        return self._flow_loss(batch, state, visual_tokens, visual_valid_mask, contact_features), None

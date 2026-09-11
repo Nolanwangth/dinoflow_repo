@@ -86,7 +86,8 @@ class RolloutStrategy(abc.ABC):
         called (warmup completion, DAgger phase transitions back to AUTONOMOUS),
         because reset makes ``needs_new_action()`` return True on the next call.
         """
-        if self._cached_obs_processed is None or self._interpolator.needs_new_action():
+        history_required = getattr(self._engine, "requires_observation_history", False)
+        if self._cached_obs_processed is None or self._interpolator.needs_new_action() or history_required:
             obs_processed = processors.robot_observation_processor(obs_raw)
             self._engine.notify_observation(obs_processed)
             self._cached_obs_processed = obs_processed

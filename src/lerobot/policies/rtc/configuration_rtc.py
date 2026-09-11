@@ -41,7 +41,9 @@ class RTCConfig:
     # Todo change to exp
     prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.LINEAR
     max_guidance_weight: float = 10.0
-    execution_horizon: int = 10
+    # DinoFlow predicts H=50 actions and refreshes when 30 remain, so the
+    # in-flight prefix constrained by RTC spans the next 20 control ticks.
+    execution_horizon: int = 20
 
     # Debug settings
     debug: bool = False
@@ -51,5 +53,7 @@ class RTCConfig:
         """Validate RTC configuration parameters."""
         if self.max_guidance_weight <= 0:
             raise ValueError(f"max_guidance_weight must be positive, got {self.max_guidance_weight}")
+        if self.execution_horizon <= 0:
+            raise ValueError(f"execution_horizon must be positive, got {self.execution_horizon}")
         if self.debug_maxlen <= 0:
             raise ValueError(f"debug_maxlen must be positive, got {self.debug_maxlen}")
