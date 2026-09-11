@@ -25,15 +25,24 @@ class DinoFlowConfig(PreTrainedConfig):
     vision_encoder_name: str = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
     vision_encoder_dim: int = 384
     vision_patch_size: int = 16
-    resampler_tokens: int = 128
+    # Freeze all original DINO weights and train only Q/V LoRA.
+    vision_lora_enabled: bool = True
+    vision_lora_rank: int = 8
+    vision_lora_alpha: int = 16
+    vision_lora_dropout: float = 0.0
+    vision_lora_lr: float = 2e-5
+    vision_gradient_checkpointing: bool = True
     hidden_dim: int = 512
-    resampler_heads: int = 8
 
+    # Keep the head at 480x768 and preserve the wrist horizontal field of view
+    # with a 480x832 target.  The preprocessing resizes to target height and
+    # center-crops only excess width, so the current 480x848 wrist frames lose
+    # 8 pixels on each side instead of being letterboxed down to 434x768.
     image_resize_shapes: dict[str, tuple[int, int]] = field(
         default_factory=lambda: {
             "observation.images.base_0_rgb": (480, 768),
-            "observation.images.left_wrist_0_rgb": (320, 560),
-            "observation.images.right_wrist_0_rgb": (320, 560),
+            "observation.images.left_wrist_0_rgb": (480, 832),
+            "observation.images.right_wrist_0_rgb": (480, 832),
         }
     )
 
@@ -92,8 +101,12 @@ class DinoFlowConfig(PreTrainedConfig):
             raise ValueError("n_action_steps must satisfy 0 < n_action_steps <= horizon")
         if self.vision_encoder_dim <= 0 or self.vision_patch_size <= 0:
             raise ValueError("vision_encoder_dim and vision_patch_size must be positive")
-        if self.resampler_tokens <= 0 or self.resampler_heads <= 0:
-            raise ValueError("resampler_tokens and resampler_heads must be positive")
+        if self.vision_lora_rank <= 0 or self.vision_lora_alpha <= 0:
+            raise ValueError("vision_lora_rank and vision_lora_alpha must be positive")
+        if not 0 <= self.vision_lora_dropout < 1:
+            raise ValueError("vision_lora_dropout must satisfy 0 <= vision_lora_dropout < 1")
+        if not 0 < self.vision_lora_lr <= self.optimizer_lr:
+            raise ValueError("vision_lora_lr must satisfy 0 < vision_lora_lr <= optimizer_lr")
         if self.hidden_dim <= 0 or self.num_layers <= 0 or self.num_heads <= 0:
             raise ValueError("hidden_dim, num_layers, and num_heads must be positive")
         if self.timestep_embed_dim <= 0 or self.timestep_embed_dim % 2 != 0:
@@ -108,8 +121,6 @@ class DinoFlowConfig(PreTrainedConfig):
             raise ValueError("scheduler_decay_lr must satisfy 0 < scheduler_decay_lr <= optimizer_lr")
         if self.hidden_dim % self.num_heads != 0:
             raise ValueError("hidden_dim must be divisible by num_heads")
-        if self.hidden_dim % self.resampler_heads != 0:
-            raise ValueError("hidden_dim must be divisible by resampler_heads")
         if not self.image_resize_shapes:
             raise ValueError("image_resize_shapes must contain at least one camera")
         for key, (height, width) in self.image_resize_shapes.items():

@@ -13,8 +13,6 @@ exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
   --hidden-dim 128 \
   --num-layers 1 \
   --num-heads 4 \
-  --resampler-tokens 16 \
-  --resampler-heads 4 \
   --num-integration-steps 2 \
   --val-freq 0 \
   --no-save-checkpoint \

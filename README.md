@@ -5,7 +5,8 @@
 ## 当前实现
 
 - 冻结 DINOv3 ViT-S/16+，输入三路相机图像。
-- 每路视觉 patch token 经过 attention resampler 后，交给 action DiT。
+- base 图像保持 `480×768`，两路 wrist 图像等比例缩放到高度 `480` 后中心裁到 `480×832`；当前 `480×848` wrist 输入只裁左右各 8 像素。base 为 `1440` 个 patch、每路 wrist 为 `1560` 个 patch，三路拼接为 `[B, 4560, 384]`，再通过共享 `Linear(384→512)` 交给 action DiT。
+- DINOv3 的 12 个 attention block 只对 `q_proj`/`v_proj` 加 LoRA（`r=8`、`alpha=16`、LoRA lr=`2e-5`），原始 DINO 权重全部冻结；DINO gradient checkpointing 只用于降低 LoRA 训练显存。关闭 `vision_lora_enabled` 可使用冻结 DINO。
 - 一次预测 50 步、26 维动作；训练默认使用 `action - current_state` 的 delta action。
 - flow matching 使用 MSE velocity loss，推理支持 Euler/Heun 积分和可选 RTC chunk 对齐。
 - 训练基于 LeRobot v3 数据集格式，支持 train/validation 两个本地数据集。
@@ -69,7 +70,7 @@ bash scripts/train_phase1.sh
 ```bash
 bash scripts/train_phase1.sh \
   --steps 30000 \
-  --batch-size 64 \
+  --batch-size 32 \
   --num-workers 12 \
   --output-dir /path/to/outputs/run_name \
   --wandb

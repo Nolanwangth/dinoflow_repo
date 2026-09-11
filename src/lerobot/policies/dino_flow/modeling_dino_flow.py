@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from collections import deque
 from typing import TYPE_CHECKING
@@ -7,7 +8,6 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 from torch import Tensor
 
 from lerobot.utils.constants import ACTION, OBS_STATE
@@ -29,29 +29,13 @@ class SinusoidalEmbedding(nn.Module):
 
     def forward(self, t: Tensor) -> Tensor:
         half = self.dim // 2
-        freq = torch.exp(-math.log(10000) * torch.arange(half, device=t.device, dtype=t.dtype) / max(half - 1, 1))
+        freq = torch.exp(
+            -math.log(10000)
+            * torch.arange(half, device=t.device, dtype=t.dtype)
+            / max(half - 1, 1)
+        )
         emb = t[:, None] * freq[None, :]
         return torch.cat([emb.sin(), emb.cos()], dim=-1)
-
-
-class AttentionResampler(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, num_tokens: int, num_heads: int):
-        super().__init__()
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
-        self.queries = nn.Parameter(torch.randn(1, num_tokens, hidden_dim) * 0.02)
-        self.attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4), nn.GELU(), nn.Linear(hidden_dim * 4, hidden_dim)
-        )
-
-    def forward(self, patch_tokens: Tensor) -> Tensor:
-        keys = self.input_proj(patch_tokens)
-        queries = self.queries.expand(patch_tokens.shape[0], -1, -1)
-        attended, _ = self.attn(queries, keys, keys, need_weights=False)
-        out = self.norm1(queries + attended)
-        return self.norm2(out + self.ffn(out))
 
 
 class DinoVisionEncoder(nn.Module):
@@ -71,9 +55,52 @@ class DinoVisionEncoder(nn.Module):
                 f"DINO patch size mismatch: checkpoint has {model_patch_size}, "
                 f"but vision_patch_size={config.vision_patch_size}"
             )
+        self.lora_enabled = config.vision_lora_enabled
+        self.gradient_checkpointing_enabled = False
+        if self.lora_enabled:
+            require_package("peft", extra="dino_flow")
+            from peft import LoraConfig, get_peft_model
+
+            for param in self.model.parameters():
+                param.requires_grad_(False)
+            self.model = get_peft_model(
+                self.model,
+                LoraConfig(
+                    r=config.vision_lora_rank,
+                    lora_alpha=config.vision_lora_alpha,
+                    lora_dropout=config.vision_lora_dropout,
+                    target_modules=["q_proj", "v_proj"],
+                    bias="none",
+                ),
+            )
+            if config.vision_gradient_checkpointing:
+                self.model.gradient_checkpointing_enable()
+                self.gradient_checkpointing_enabled = True
+            lora_parameter_names = [
+                name
+                for name, param in self.model.named_parameters()
+                if param.requires_grad and ("lora_A" in name or "lora_B" in name)
+            ]
+            expected_lora_parameters = 2 * 2 * getattr(self.model.config, "num_hidden_layers", 12)
+            if len(lora_parameter_names) != expected_lora_parameters:
+                raise RuntimeError(
+                    "DINO Q/V LoRA target check failed: "
+                    f"found {len(lora_parameter_names)} trainable adapter tensors, "
+                    f"expected {expected_lora_parameters} for Q/V in all Transformer blocks."
+                )
+            logging.info(
+                "DINOv3 Q/V LoRA enabled: rank=%s alpha=%s dropout=%s trainable_tensors=%s",
+                config.vision_lora_rank,
+                config.vision_lora_alpha,
+                config.vision_lora_dropout,
+                len(lora_parameter_names),
+            )
+            if config.vision_gradient_checkpointing:
+                logging.info("DINO gradient checkpointing enabled for LoRA training")
+        else:
+            for param in self.model.parameters():
+                param.requires_grad_(False)
         self.model.eval()
-        for param in self.model.parameters():
-            param.requires_grad = False
         self.image_sizes = config.image_resize_shapes
         self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
@@ -81,30 +108,88 @@ class DinoVisionEncoder(nn.Module):
     def train(self, mode: bool = True):
         super().train(mode)
         self.model.eval()
+        # DINO's checkpointing wrapper only activates while each Transformer
+        # layer is in train mode. Keep the frozen model's stochastic layers in
+        # eval mode, while marking the checkpointed layers as training layers.
+        # DINOv3-S+ has no active dropout/drop-path here (drop_path_rate=0).
+        if mode and self.gradient_checkpointing_enabled:
+            base_model = self.model.get_base_model()
+            for layer in base_model.model.layer:
+                layer.train(True)
         return self
 
-    def _preprocess(self, image: Tensor, size: tuple[int, int]) -> Tensor:
+    def _preprocess(self, image: Tensor, size: tuple[int, int]) -> tuple[Tensor, Tensor]:
+        """Resize one camera and return its image plus valid patch mask.
+
+        The image is resized to the target height while preserving aspect
+        ratio. If it is wider than the target, excess width is center-cropped;
+        if it is narrower, it is centered and padded with black pixels. A
+        patch is valid when any part of its receptive field overlaps the
+        resized image; fully padded patches are masked out in the Action DiT
+        cross-attention.
+        """
+        if image.ndim != 4:
+            raise ValueError(f"Expected camera images in BCHW format, got shape {tuple(image.shape)}")
+
+        target_height, target_width = size
+        _, _, source_height, source_width = image.shape
+        resize_ratio = source_height / target_height
+        resized_height = target_height
+        resized_width = max(1, int(round(source_width / resize_ratio)))
+
         image = image.float()
         if image.max() > 1.5:
             image = image / 255.0
-        image = torchvision.transforms.functional.resize(image, size, antialias=True)
+        image = F.interpolate(
+            image, size=(resized_height, resized_width), mode="bilinear", align_corners=False
+        )
+
+        crop_width = max(0, resized_width - target_width)
+        crop_left = crop_width // 2
+        crop_right = crop_width - crop_left
+        if crop_width:
+            image = image[..., crop_left : resized_width - crop_right]
+            resized_width = target_width
+
+        pad_width = target_width - resized_width
+        pad_left = pad_width // 2
+        pad_right = pad_width - pad_left
+        image = F.pad(image, (pad_left, pad_right, 0, 0), mode="constant", value=0.0)
+
+        valid_pixels = torch.zeros(
+            (image.shape[0], 1, target_height, target_width), device=image.device, dtype=torch.bool
+        )
+        valid_pixels[:, :, :, pad_left : pad_left + resized_width] = True
+        grid_height = target_height // self.model.config.patch_size
+        grid_width = target_width // self.model.config.patch_size
+        patch_size = self.model.config.patch_size
+        valid_patches = valid_pixels.reshape(
+            image.shape[0], 1, grid_height, patch_size, grid_width, patch_size
+        ).any(dim=(1, 3, 5)).reshape(image.shape[0], grid_height * grid_width)
+
         mean = self.mean.to(image.device, image.dtype)
         std = self.std.to(image.device, image.dtype)
-        return (image - mean) / std
+        return (image - mean) / std, valid_patches
 
-    def forward(self, images: dict[str, Tensor]) -> dict[str, Tensor]:
+    def forward(self, images: dict[str, Tensor]) -> dict[str, tuple[Tensor, Tensor]]:
         outputs = {}
         for key, image in images.items():
             if image.ndim == 5:
                 image = image[:, -1]
-            image = self._preprocess(image, self.image_sizes[key])
-            with torch.no_grad():
+            image, valid_patches = self._preprocess(image, self.image_sizes[key])
+            context = torch.enable_grad() if self.lora_enabled and torch.is_grad_enabled() else torch.no_grad()
+            with context:
                 model_out = self.model(pixel_values=image)
             # DINOv3 exposes CLS + four register tokens.  Keep this dynamic so
             # an accessible DINOv2 checkpoint can be used for a local smoke test.
             num_prefix_tokens = getattr(self.model.config, "num_register_tokens", 0) + 1
             patch_tokens = model_out.last_hidden_state[:, num_prefix_tokens:]
-            outputs[key] = patch_tokens
+            if patch_tokens.shape[1] != valid_patches.shape[1]:
+                raise RuntimeError(
+                    f"DINO patch count mismatch for {key}: model returned {patch_tokens.shape[1]} patches, "
+                    f"but the {self.image_sizes[key]} input requires {valid_patches.shape[1]}."
+                )
+            outputs[key] = (patch_tokens, valid_patches)
         return outputs
 
 
@@ -116,18 +201,28 @@ class ActionDiTBlock(nn.Module):
         self.norm_cross = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
         self.norm_ffn = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 4, dim))
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 4, dim)
+        )
         self.ada = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
         nn.init.zeros_(self.ada[-1].weight)
         nn.init.zeros_(self.ada[-1].bias)
 
-    def forward(self, x: Tensor, condition: Tensor, time_emb: Tensor) -> Tensor:
+    def forward(
+        self, x: Tensor, condition: Tensor, condition_key_padding_mask: Tensor | None, time_emb: Tensor
+    ) -> Tensor:
         shift_s, scale_s, gate_s, shift_c, scale_c, gate_c = self.ada(time_emb).chunk(6, dim=-1)
         h = self.norm_self(x) * (1 + scale_s[:, None]) + shift_s[:, None]
         self_out, _ = self.self_attn(h, h, h, need_weights=False)
         x = x + gate_s[:, None] * self_out
         h = self.norm_cross(x) * (1 + scale_c[:, None]) + shift_c[:, None]
-        cross, _ = self.cross_attn(h, condition, condition, need_weights=False)
+        cross, _ = self.cross_attn(
+            h,
+            condition,
+            condition,
+            key_padding_mask=condition_key_padding_mask,
+            need_weights=False,
+        )
         x = x + gate_c[:, None] * cross
         x = x + self.ffn(self.norm_ffn(x))
         return x
@@ -140,28 +235,49 @@ class ActionDiT(nn.Module):
         # direct per-timestep access to the observed joints (not just a single
         # state token among hundreds of visual tokens).
         self.action_in = nn.Linear(config.action_dim + config.state_dim, config.hidden_dim)
-        self.state_in = nn.Sequential(nn.Linear(config.state_dim, config.hidden_dim), nn.SiLU(), nn.Linear(config.hidden_dim, config.hidden_dim))
-        self.time_in = nn.Sequential(SinusoidalEmbedding(config.timestep_embed_dim), nn.Linear(config.timestep_embed_dim, config.hidden_dim), nn.SiLU(), nn.Linear(config.hidden_dim, config.hidden_dim))
-        self.action_pos = nn.Parameter(torch.randn(1, config.horizon, config.hidden_dim) * 0.02)
-        self.camera_embeddings = nn.Parameter(
-            torch.randn(len(config.image_resize_shapes), 1, config.hidden_dim) * 0.02
+        self.state_in = nn.Sequential(
+            nn.Linear(config.state_dim, config.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
         )
-        self.blocks = nn.ModuleList([ActionDiTBlock(config.hidden_dim, config.num_heads, config.dropout) for _ in range(config.num_layers)])
+        self.time_in = nn.Sequential(
+            SinusoidalEmbedding(config.timestep_embed_dim),
+            nn.Linear(config.timestep_embed_dim, config.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+        )
+        self.action_pos = nn.Parameter(torch.randn(1, config.horizon, config.hidden_dim) * 0.02)
+        self.blocks = nn.ModuleList(
+            [
+                ActionDiTBlock(config.hidden_dim, config.num_heads, config.dropout)
+                for _ in range(config.num_layers)
+            ]
+        )
         self.norm = nn.LayerNorm(config.hidden_dim)
         self.action_out = nn.Linear(config.hidden_dim, config.action_dim)
 
-    def forward(self, noisy_action: Tensor, state: Tensor, visual_tokens: list[Tensor], t: Tensor) -> Tensor:
+    def forward(
+        self,
+        noisy_action: Tensor,
+        state: Tensor,
+        visual_tokens: Tensor,
+        visual_valid_mask: Tensor,
+        t: Tensor,
+    ) -> Tensor:
         state_expanded = state[:, None, :].expand(-1, noisy_action.shape[1], -1)
         action_input = torch.cat([noisy_action, state_expanded], dim=-1)
         action_tokens = self.action_in(action_input) + self.action_pos[:, : noisy_action.shape[1]]
-        condition_parts = []
-        for idx, tokens in enumerate(visual_tokens):
-            condition_parts.append(tokens + self.camera_embeddings[idx])
-        condition_parts.append(self.state_in(state)[:, None])
-        condition = torch.cat(condition_parts, dim=1)
+        condition = torch.cat([visual_tokens, self.state_in(state)[:, None]], dim=1)
+        condition_key_padding_mask = torch.cat(
+            [
+                ~visual_valid_mask.to(torch.bool),
+                torch.zeros((state.shape[0], 1), device=state.device, dtype=torch.bool),
+            ],
+            dim=1,
+        )
         time_emb = self.time_in(t)
         for block in self.blocks:
-            action_tokens = block(action_tokens, condition, time_emb)
+            action_tokens = block(action_tokens, condition, condition_key_padding_mask, time_emb)
         return self.action_out(self.norm(action_tokens))
 
 
@@ -177,15 +293,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         self.config.validate_features()
         self.vision = DinoVisionEncoder(config)
         self.camera_keys = list(config.image_resize_shapes)
-        self.resamplers = nn.ModuleList([
-            AttentionResampler(
-                config.vision_encoder_dim,
-                config.hidden_dim,
-                config.resampler_tokens,
-                config.resampler_heads,
-            )
-            for _ in self.camera_keys
-        ])
+        self.visual_projection = nn.Linear(config.vision_encoder_dim, config.hidden_dim)
         self.action_model = ActionDiT(config)
         # A fixed initial noise makes deployment deterministic.  The policy
         # still changes with image/state conditioning, but repeated requests
@@ -195,7 +303,22 @@ class DinoFlowPolicy(PreTrainedPolicy):
         self.reset()
 
     def get_optim_params(self) -> list:
-        return [param for param in self.parameters() if param.requires_grad]
+        other_params = []
+        lora_params = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "lora_A" in name or "lora_B" in name:
+                lora_params.append(param)
+            else:
+                other_params.append(param)
+
+        param_groups = []
+        if other_params:
+            param_groups.append({"params": other_params})
+        if lora_params:
+            param_groups.append({"params": lora_params, "lr": self.config.vision_lora_lr})
+        return param_groups
 
     def reset(self):
         self._action_queue.clear()
@@ -206,19 +329,29 @@ class DinoFlowPolicy(PreTrainedPolicy):
             state = state[:, -1]
         return state[..., : self.config.state_dim]
 
-    def _current_images(self, batch: dict[str, Tensor]) -> list[Tensor]:
-        patch_tokens = self.vision({key: batch[key] for key in self.camera_keys})
-        return [resampler(patch_tokens[key]) for key, resampler in zip(self.camera_keys, self.resamplers)]
+    def _current_images(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+        encoded = self.vision({key: batch[key] for key in self.camera_keys})
+        patch_tokens = torch.cat([encoded[key][0] for key in self.camera_keys], dim=1)
+        valid_mask = torch.cat([encoded[key][1] for key in self.camera_keys], dim=1)
+        return self.visual_projection(patch_tokens), valid_mask
 
-    def _condition(self, batch: dict[str, Tensor]) -> tuple[Tensor, list[Tensor]]:
+    def _condition(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor]:
         state = self._current_state(batch)
-        visual_tokens = self._current_images(batch)
-        return state, visual_tokens
+        visual_tokens, visual_valid_mask = self._current_images(batch)
+        return state, visual_tokens, visual_valid_mask
 
-    def _predict_velocity(self, x: Tensor, t: Tensor, state: Tensor, visual_tokens: list[Tensor]) -> Tensor:
-        return self.action_model(x, state, visual_tokens, t)
+    def _predict_velocity(
+        self, x: Tensor, t: Tensor, state: Tensor, visual_tokens: Tensor, visual_valid_mask: Tensor
+    ) -> Tensor:
+        return self.action_model(x, state, visual_tokens, visual_valid_mask, t)
 
-    def _flow_loss(self, batch: dict[str, Tensor], state: Tensor, visual_tokens: list[Tensor]) -> Tensor:
+    def _flow_loss(
+        self,
+        batch: dict[str, Tensor],
+        state: Tensor,
+        visual_tokens: Tensor,
+        visual_valid_mask: Tensor,
+    ) -> Tensor:
         target = batch[ACTION][..., : self.config.action_dim]
         if target.ndim == 2:
             target = target.unsqueeze(0)
@@ -234,7 +367,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         t_view = t[:, None, None]
         x_t = (1 - t_view) * noise + t_view * target
         target_velocity = target - noise
-        pred = self._predict_velocity(x_t, t, state, visual_tokens)
+        pred = self._predict_velocity(x_t, t, state, visual_tokens, visual_valid_mask)
         loss = F.mse_loss(pred, target_velocity, reduction="none")
         if self.config.do_mask_loss_for_padding and "action_is_pad" in batch:
             action_is_pad = batch["action_is_pad"]
@@ -311,7 +444,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         inference_delay: int = 0,
         execution_horizon: int = 10,
     ) -> Tensor:
-        state, visual_tokens = self._condition(batch)
+        state, visual_tokens, visual_valid_mask = self._condition(batch)
         dtype = next(self.action_model.parameters()).dtype
         noise_shape = (state.shape[0], self.config.horizon, self.config.action_dim)
         noise_key = (noise_shape, str(state.device), dtype)
@@ -335,14 +468,16 @@ class DinoFlowPolicy(PreTrainedPolicy):
         dt = 1.0 / steps
         for i in range(steps):
             t = torch.full((state.shape[0],), i / steps, device=state.device, dtype=dtype)
-            velocity = self._predict_velocity(x, t, state, visual_tokens)
+            velocity = self._predict_velocity(x, t, state, visual_tokens, visual_valid_mask)
             velocity = self._rtc_velocity(
                 x, velocity, t, prev_chunk_left_over, inference_delay, execution_horizon
             )
             if self.config.integration_method == "heun" and i < steps - 1:
                 x_euler = x + dt * velocity
                 t_next = torch.full((state.shape[0],), (i + 1) / steps, device=state.device, dtype=dtype)
-                velocity_next = self._predict_velocity(x_euler, t_next, state, visual_tokens)
+                velocity_next = self._predict_velocity(
+                    x_euler, t_next, state, visual_tokens, visual_valid_mask
+                )
                 velocity_next = self._rtc_velocity(
                     x_euler, velocity_next, t_next, prev_chunk_left_over,
                     inference_delay, execution_horizon,
@@ -376,5 +511,5 @@ class DinoFlowPolicy(PreTrainedPolicy):
         )
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict | None]:
-        state, visual_tokens = self._condition(batch)
-        return self._flow_loss(batch, state, visual_tokens), None
+        state, visual_tokens, visual_valid_mask = self._condition(batch)
+        return self._flow_loss(batch, state, visual_tokens, visual_valid_mask), None

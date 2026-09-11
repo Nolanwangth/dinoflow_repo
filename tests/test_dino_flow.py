@@ -1,7 +1,8 @@
 import torch
+from torch import nn
 
 from lerobot.policies.dino_flow.configuration_dino_flow import DinoFlowConfig
-from lerobot.policies.dino_flow.modeling_dino_flow import ActionDiT, DinoFlowPolicy
+from lerobot.policies.dino_flow.modeling_dino_flow import ActionDiT, DinoFlowPolicy, DinoVisionEncoder
 
 
 def _small_config() -> DinoFlowConfig:
@@ -13,8 +14,6 @@ def _small_config() -> DinoFlowConfig:
         hidden_dim=32,
         num_layers=1,
         num_heads=4,
-        resampler_tokens=4,
-        resampler_heads=4,
         image_resize_shapes={"camera_a": (32, 32), "camera_b": (32, 32)},
     )
 
@@ -27,18 +26,55 @@ def test_dino_flow_config_defaults_are_valid_without_dataset_features():
     assert config.action_delta_indices == [0, 1, 2, 3, 4]
 
 
+def test_default_camera_targets_preserve_wrist_width():
+    config = DinoFlowConfig()
+
+    assert config.image_resize_shapes["observation.images.base_0_rgb"] == (480, 768)
+    assert config.image_resize_shapes["observation.images.left_wrist_0_rgb"] == (480, 832)
+    assert config.image_resize_shapes["observation.images.right_wrist_0_rgb"] == (480, 832)
+
+
+def test_wrist_preprocess_center_crops_only_eight_pixels_each_side():
+    class FakeDino(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = type("Config", (), {"patch_size": 16})()
+
+    encoder = DinoVisionEncoder.__new__(DinoVisionEncoder)
+    nn.Module.__init__(encoder)
+    encoder.model = FakeDino()
+    encoder.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    encoder.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+    source = torch.linspace(0.0, 1.0, 848).view(1, 1, 1, 848).expand(1, 3, 480, 848)
+    processed, valid_mask = encoder._preprocess(source, (480, 832))
+    expected = (source[..., 8:840] - encoder.mean) / encoder.std
+
+    assert processed.shape == (1, 3, 480, 832)
+    torch.testing.assert_close(processed, expected)
+    assert valid_mask.shape == (1, 30 * 52)
+    assert valid_mask.all()
+
+
 def test_action_dit_forward_shape():
     config = _small_config()
     model = ActionDiT(config)
     noisy_action = torch.randn(2, config.horizon, config.action_dim)
     state = torch.randn(2, config.state_dim)
-    visual_tokens = [torch.randn(2, 3, config.hidden_dim), torch.randn(2, 2, config.hidden_dim)]
+    visual_tokens = torch.randn(2, 5, config.hidden_dim)
+    visual_valid_mask = torch.tensor([[True, True, True, False, False]]).expand(2, -1)
     timestep = torch.rand(2)
 
-    output = model(noisy_action, state, visual_tokens, timestep)
+    output = model(noisy_action, state, visual_tokens, visual_valid_mask, timestep)
 
     assert output.shape == (2, config.horizon, config.action_dim)
     assert torch.isfinite(output).all()
+
+
+def test_action_dit_has_no_camera_embedding():
+    model = ActionDiT(_small_config())
+
+    assert not hasattr(model, "camera_embeddings")
 
 
 def test_rtc_prefix_weights_fade_to_zero():

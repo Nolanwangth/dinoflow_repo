@@ -11,7 +11,7 @@ DINOFLOW_JOB_NAME="${DINOFLOW_JOB_NAME:-$(basename "$DINOFLOW_OUTPUT_DIR")}"
 DINOFLOW_DATASET_REPO_ID="${DINOFLOW_DATASET_REPO_ID:-local/splice_wires_phase1_train}"
 DINOFLOW_VAL_DATASET_REPO_ID="${DINOFLOW_VAL_DATASET_REPO_ID:-local/splice_wires_phase1_validation}"
 DINOFLOW_STEPS="${DINOFLOW_STEPS:-30000}"
-DINOFLOW_BATCH_SIZE="${DINOFLOW_BATCH_SIZE:-64}"
+DINOFLOW_BATCH_SIZE="${DINOFLOW_BATCH_SIZE:-32}"
 DINOFLOW_NUM_WORKERS="${DINOFLOW_NUM_WORKERS:-12}"
 DINOFLOW_PREFETCH_FACTOR="${DINOFLOW_PREFETCH_FACTOR:-2}"
 DINOFLOW_LOG_FREQ="${DINOFLOW_LOG_FREQ:-50}"
@@ -22,11 +22,15 @@ DINOFLOW_SAVE_FREQ="${DINOFLOW_SAVE_FREQ:-5000}"
 DINOFLOW_HIDDEN_DIM="${DINOFLOW_HIDDEN_DIM:-512}"
 DINOFLOW_NUM_LAYERS="${DINOFLOW_NUM_LAYERS:-6}"
 DINOFLOW_NUM_HEADS="${DINOFLOW_NUM_HEADS:-8}"
-DINOFLOW_RESAMPLER_TOKENS="${DINOFLOW_RESAMPLER_TOKENS:-128}"
-DINOFLOW_RESAMPLER_HEADS="${DINOFLOW_RESAMPLER_HEADS:-8}"
 DINOFLOW_INTEGRATION_STEPS="${DINOFLOW_INTEGRATION_STEPS:-8}"
 DINOFLOW_INTEGRATION_METHOD="${DINOFLOW_INTEGRATION_METHOD:-euler}"
 DINOFLOW_VISION_DIM="${DINOFLOW_VISION_DIM:-384}"
+DINOFLOW_VISION_LORA_ENABLED="${DINOFLOW_VISION_LORA_ENABLED:-true}"
+DINOFLOW_VISION_LORA_RANK="${DINOFLOW_VISION_LORA_RANK:-8}"
+DINOFLOW_VISION_LORA_ALPHA="${DINOFLOW_VISION_LORA_ALPHA:-16}"
+DINOFLOW_VISION_LORA_DROPOUT="${DINOFLOW_VISION_LORA_DROPOUT:-0.0}"
+DINOFLOW_VISION_LORA_LR="${DINOFLOW_VISION_LORA_LR:-2e-5}"
+DINOFLOW_VISION_GRADIENT_CHECKPOINTING="${DINOFLOW_VISION_GRADIENT_CHECKPOINTING:-true}"
 DINOFLOW_OPTIMIZER_LR="${DINOFLOW_OPTIMIZER_LR:-1e-4}"
 DINOFLOW_SCHEDULER_DECAY_LR="${DINOFLOW_SCHEDULER_DECAY_LR:-1e-5}"
 DINOFLOW_WEIGHT_DECAY="${DINOFLOW_WEIGHT_DECAY:-1e-6}"
@@ -49,17 +53,21 @@ usage() {
 
 训练:
   --steps N                       训练步数，默认 30000
-  --batch-size N                  batch size，默认 64
+  --batch-size N                  batch size，默认 32
   --num-workers N                 DataLoader worker 数，默认 12
   --prefetch-factor N             每个 worker 预取数量，默认 2
   --log-freq N                    日志频率，默认 50
   --hidden-dim N                  action DiT 隐藏维度，默认 512
   --num-layers N                  action DiT 层数，默认 6
   --num-heads N                   attention heads，默认 8
-  --resampler-tokens N            每路相机 resampler token 数，默认 128
-  --resampler-heads N             resampler heads，默认 8
   --num-integration-steps N       推理积分步数，默认 8
   --integration-method NAME       euler 或 heun，默认 euler
+  --vision-lora / --no-vision-lora DINO Q/V LoRA，默认开启，rank=8
+  --vision-lora-rank N             DINO LoRA rank，默认 8
+  --vision-lora-alpha N            DINO LoRA alpha，默认 16
+  --vision-lora-lr LR               DINO LoRA 学习率，默认 2e-5
+  --vision-gradient-checkpointing / --no-vision-gradient-checkpointing
+                                  LoRA 训练时对 DINO 重算激活，默认开启
   --optimizer-lr LR               学习率，默认 1e-4
   --scheduler-decay-lr LR         cosine 最低学习率，默认 1e-5
   --save-freq N                   checkpoint 保存频率，默认 5000
@@ -102,10 +110,15 @@ while (($# > 0)); do
     --hidden-dim) require_value "$1" "${2:-}"; DINOFLOW_HIDDEN_DIM="$2"; shift 2 ;;
     --num-layers) require_value "$1" "${2:-}"; DINOFLOW_NUM_LAYERS="$2"; shift 2 ;;
     --num-heads) require_value "$1" "${2:-}"; DINOFLOW_NUM_HEADS="$2"; shift 2 ;;
-    --resampler-tokens) require_value "$1" "${2:-}"; DINOFLOW_RESAMPLER_TOKENS="$2"; shift 2 ;;
-    --resampler-heads) require_value "$1" "${2:-}"; DINOFLOW_RESAMPLER_HEADS="$2"; shift 2 ;;
     --num-integration-steps) require_value "$1" "${2:-}"; DINOFLOW_INTEGRATION_STEPS="$2"; shift 2 ;;
     --integration-method) require_value "$1" "${2:-}"; DINOFLOW_INTEGRATION_METHOD="$2"; shift 2 ;;
+    --vision-lora) DINOFLOW_VISION_LORA_ENABLED=true; shift ;;
+    --no-vision-lora) DINOFLOW_VISION_LORA_ENABLED=false; shift ;;
+    --vision-lora-rank) require_value "$1" "${2:-}"; DINOFLOW_VISION_LORA_RANK="$2"; shift 2 ;;
+    --vision-lora-alpha) require_value "$1" "${2:-}"; DINOFLOW_VISION_LORA_ALPHA="$2"; shift 2 ;;
+    --vision-lora-lr) require_value "$1" "${2:-}"; DINOFLOW_VISION_LORA_LR="$2"; shift 2 ;;
+    --vision-gradient-checkpointing) DINOFLOW_VISION_GRADIENT_CHECKPOINTING=true; shift ;;
+    --no-vision-gradient-checkpointing) DINOFLOW_VISION_GRADIENT_CHECKPOINTING=false; shift ;;
     --optimizer-lr) require_value "$1" "${2:-}"; DINOFLOW_OPTIMIZER_LR="$2"; shift 2 ;;
     --scheduler-decay-lr) require_value "$1" "${2:-}"; DINOFLOW_SCHEDULER_DECAY_LR="$2"; shift 2 ;;
     --save-freq) require_value "$1" "${2:-}"; DINOFLOW_SAVE_FREQ="$2"; shift 2 ;;
@@ -168,14 +181,22 @@ exec python -m lerobot.scripts.lerobot_train \
   --dataset.repo_id "$DINOFLOW_DATASET_REPO_ID" \
   --dataset.root "$DINOFLOW_DATASET_ROOT" \
   --dataset.return_uint8 true \
+  --dataset.video_backend pyav \
   --dataset.use_imagenet_stats false \
   --validation_dataset.repo_id "$DINOFLOW_VAL_DATASET_REPO_ID" \
   --validation_dataset.root "$DINOFLOW_VAL_DATASET_ROOT" \
   --validation_dataset.return_uint8 true \
+  --validation_dataset.video_backend pyav \
   --validation_dataset.use_imagenet_stats false \
   --policy.type dino_flow \
   --policy.vision_encoder_name "$DINOFLOW_VISION_ENCODER" \
   --policy.vision_encoder_dim "$DINOFLOW_VISION_DIM" \
+  --policy.vision_lora_enabled "$DINOFLOW_VISION_LORA_ENABLED" \
+  --policy.vision_lora_rank "$DINOFLOW_VISION_LORA_RANK" \
+  --policy.vision_lora_alpha "$DINOFLOW_VISION_LORA_ALPHA" \
+  --policy.vision_lora_dropout "$DINOFLOW_VISION_LORA_DROPOUT" \
+  --policy.vision_lora_lr "$DINOFLOW_VISION_LORA_LR" \
+  --policy.vision_gradient_checkpointing "$DINOFLOW_VISION_GRADIENT_CHECKPOINTING" \
   --policy.use_amp true \
   --policy.horizon 50 \
   --policy.n_action_steps 50 \
@@ -183,8 +204,6 @@ exec python -m lerobot.scripts.lerobot_train \
   --policy.hidden_dim "$DINOFLOW_HIDDEN_DIM" \
   --policy.num_layers "$DINOFLOW_NUM_LAYERS" \
   --policy.num_heads "$DINOFLOW_NUM_HEADS" \
-  --policy.resampler_tokens "$DINOFLOW_RESAMPLER_TOKENS" \
-  --policy.resampler_heads "$DINOFLOW_RESAMPLER_HEADS" \
   --policy.num_integration_steps "$DINOFLOW_INTEGRATION_STEPS" \
   --policy.integration_method "$DINOFLOW_INTEGRATION_METHOD" \
   --policy.use_delta_action "$DINOFLOW_USE_DELTA_ACTION" \
