@@ -14,6 +14,7 @@
 - 训练命令：`bash scripts/train_visuo_tac.sh`
 - 输出：`outputs/visuo_tac_phase1_force_tactile_history6_lora_qv_r8_b32_lr1e-4_lora2e-5_30k_seed1000/`
 - 保存：每 `5000` steps checkpoint；每 `2500` steps validation；W&B project `splice_wires_dinoflow`，不上传权重 artifact
+- 正式运行：W&B [8hxtvkhp](https://wandb.ai/nolanwangth-karlsruhe-institute-of-technology/splice_wires_dinoflow/runs/8hxtvkhp)，2026-09-11 21:48 启动
 
 ## 验证
 
