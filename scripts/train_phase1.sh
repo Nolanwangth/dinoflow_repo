@@ -19,7 +19,7 @@ DINOFLOW_VAL_FREQ="${DINOFLOW_VAL_FREQ:-2500}"
 DINOFLOW_VAL_BATCH_SIZE="${DINOFLOW_VAL_BATCH_SIZE:-8}"
 DINOFLOW_VAL_NUM_FRAMES="${DINOFLOW_VAL_NUM_FRAMES:-16}"
 DINOFLOW_SAVE_FREQ="${DINOFLOW_SAVE_FREQ:-5000}"
-DINOFLOW_HIDDEN_DIM="${DINOFLOW_HIDDEN_DIM:-512}"
+DINOFLOW_HIDDEN_DIM="${DINOFLOW_HIDDEN_DIM:-256}"
 DINOFLOW_NUM_LAYERS="${DINOFLOW_NUM_LAYERS:-6}"
 DINOFLOW_NUM_HEADS="${DINOFLOW_NUM_HEADS:-8}"
 DINOFLOW_INTEGRATION_STEPS="${DINOFLOW_INTEGRATION_STEPS:-8}"
@@ -57,7 +57,7 @@ usage() {
   --num-workers N                 DataLoader worker 数，默认 12
   --prefetch-factor N             每个 worker 预取数量，默认 2
   --log-freq N                    日志频率，默认 50
-  --hidden-dim N                  action DiT 隐藏维度，默认 512
+  --hidden-dim N                  action DiT 隐藏维度，默认 256
   --num-layers N                  action DiT 层数，默认 6
   --num-heads N                   attention heads，默认 8
   --num-integration-steps N       推理积分步数，默认 8

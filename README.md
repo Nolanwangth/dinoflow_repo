@@ -5,7 +5,7 @@
 ## 当前实现
 
 - 冻结 DINOv3 ViT-S/16+，输入三路相机图像。
-- base 图像保持 `480×768`，两路 wrist 图像等比例缩放到高度 `480` 后中心裁到 `480×832`；当前 `480×848` wrist 输入只裁左右各 8 像素。base 为 `1440` 个 patch、每路 wrist 为 `1560` 个 patch，三路拼接为 `[B, 4560, 384]`，再通过共享 `Linear(384→512)` 交给 action DiT。
+- base 图像保持 `480×768`，两路 wrist 图像等比例缩放到高度 `480` 后中心裁到 `480×832`；当前 `480×848` wrist 输入只裁左右各 8 像素。base 为 `1440` 个 patch、每路 wrist 为 `1560` 个 patch，三路拼接为 `[B, 4560, 384]`，再通过共享 `Linear(384→256)` 压缩到统一的 Action DiT 隐藏维度 256；最终机器人 action 仍为 26 维。
 - DINOv3 的 12 个 attention block 只对 `q_proj`/`v_proj` 加 LoRA（`r=8`、`alpha=16`、LoRA lr=`2e-5`），原始 DINO 权重全部冻结；DINO gradient checkpointing 只用于降低 LoRA 训练显存。关闭 `vision_lora_enabled` 可使用冻结 DINO。
 - 一次预测 50 步、26 维动作；训练默认直接预测归一化后的 absolute action。使用 `--delta-action` 可切换到 `action - current_state` 的 delta action。
 - flow matching 使用 MSE velocity loss，推理支持 Euler/Heun 积分和可选 RTC chunk 对齐。

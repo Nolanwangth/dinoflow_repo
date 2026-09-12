@@ -41,7 +41,10 @@ class DinoFlowConfig(PreTrainedConfig):
     vision_lora_dropout: float = 0.0
     vision_lora_lr: float = 2e-5
     vision_gradient_checkpointing: bool = True
-    hidden_dim: int = 512
+    # Shared latent width after projecting DINO's native 384-d features.
+    # This is also the Action DiT width; the physical action output remains
+    # ``action_dim`` (26 robot joints).
+    hidden_dim: int = 256
 
     # Keep the head at 480x768 and preserve the wrist horizontal field of view
     # with a 480x832 target.  The preprocessing resizes to target height and

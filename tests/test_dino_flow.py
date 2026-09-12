@@ -32,6 +32,13 @@ def test_dino_flow_config_defaults_are_valid_without_dataset_features():
     assert config.use_delta_action is False
 
 
+def test_default_config_uses_absolute_action_and_shared_256_latent():
+    config = DinoFlowConfig()
+
+    assert config.use_delta_action is False
+    assert config.hidden_dim == 256
+
+
 def test_default_camera_targets_preserve_wrist_width():
     config = DinoFlowConfig()
 

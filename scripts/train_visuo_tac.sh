@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DINOFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DINOFLOW_OUTPUT_DIR="${DINOFLOW_OUTPUT_DIR:-$DINOFLOW_ROOT/outputs/visuo_tac_phase1_force_tactile_history6_absolute_action_lora_qv_r8_b32_lr1e-4_lora2e-5_30k_seed1000}"
+DINOFLOW_OUTPUT_DIR="${DINOFLOW_OUTPUT_DIR:-$DINOFLOW_ROOT/outputs/visuo_tac_phase1_force_tactile_history6_absolute_action_h256_lora_qv_r8_b32_lr1e-4_lora2e-5_30k_seed1000}"
 DINOFLOW_JOB_NAME="${DINOFLOW_JOB_NAME:-$(basename "$DINOFLOW_OUTPUT_DIR")}"
 
 exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
@@ -21,6 +21,7 @@ exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
   --vision-lora-alpha "${DINOFLOW_VISION_LORA_ALPHA:-16}" \
   --vision-lora-lr "${DINOFLOW_VISION_LORA_LR:-2e-5}" \
   --optimizer-lr "${DINOFLOW_OPTIMIZER_LR:-1e-4}" \
+  --hidden-dim "${DINOFLOW_HIDDEN_DIM:-256}" \
   --wandb \
   --save-checkpoint \
   --absolute-action \
