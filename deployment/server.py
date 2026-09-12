@@ -115,6 +115,9 @@ class DinoFlowSession:
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
         self.state_dim = int(policy.config.state_dim)
+        self.observation_state_dim = int(
+            getattr(policy.config, "observation_state_dim", self.state_dim)
+        )
         self.action_dim = int(policy.config.action_dim)
         self.action_normalizer = next(
             (step for step in preprocessor.steps if isinstance(step, NormalizerProcessorStep)), None
@@ -126,11 +129,23 @@ class DinoFlowSession:
         return torch.from_numpy(array).permute(2, 0, 1).float().div_(255.0)
 
     def _batch(self, obs: Observation) -> dict:
-        joints = np.zeros(self.state_dim, dtype=np.float32)
-        values = np.asarray(obs.state, dtype=np.float32).ravel()
-        joints[: min(len(values), self.state_dim)] = values[: self.state_dim]
+        values = np.asarray(obs.state, dtype=np.float32)
+        if values.ndim == 1:
+            values = values[None, :]
+        if values.ndim != 2:
+            raise ValueError(f"state must have shape [D] or [T,D], got {values.shape}")
+        if not np.isfinite(values).all():
+            raise ValueError("state contains NaN or Inf")
+        state_history = np.zeros(
+            (values.shape[0], self.observation_state_dim), dtype=np.float32
+        )
+        state_history[:, : min(values.shape[1], self.observation_state_dim)] = values[
+            :, : self.observation_state_dim
+        ]
         return {
-            "observation.state": torch.from_numpy(joints),
+            # The generic batch processor only adds a batch dimension to
+            # 1-D states. Keep the history explicitly batched as [1,T,D].
+            "observation.state": torch.from_numpy(state_history[None, ...]),
             "observation.images.base_0_rgb": self._decode(obs.head),
             "observation.images.left_wrist_0_rgb": self._decode(obs.left_wrist),
             "observation.images.right_wrist_0_rgb": self._decode(obs.right_wrist),

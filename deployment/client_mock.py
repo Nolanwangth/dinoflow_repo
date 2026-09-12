@@ -15,6 +15,7 @@ import struct
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +99,18 @@ class MockClient:
         self.current_idx = 0
         self.request_inflight = False
         self.exec_counter = 0
+        self.state_history = deque(maxlen=6)
+
+    @staticmethod
+    def _flatten_tactile(value) -> np.ndarray:
+        """Flatten six GDK finger regions into the 302-value hand layout."""
+        if value is None:
+            return np.zeros(302, dtype=np.float32)
+        parts = [np.asarray(region, dtype=np.float32).reshape(-1) for region in value]
+        flattened = np.concatenate(parts) if parts else np.empty(0, dtype=np.float32)
+        output = np.zeros(302, dtype=np.float32)
+        output[: min(output.size, flattened.size)] = flattened[: output.size]
+        return output
 
     def observation(self):
         from wbc_gdk import WbcGdk
@@ -117,6 +130,16 @@ class MockClient:
         force = np.asarray(state.get("hand_force", []), dtype=np.float32).reshape(-1)
         if force.size == 12:
             full_state[30:42] = force
+        tactile = np.concatenate(
+            (
+                self._flatten_tactile(state.get("tactile_left")),
+                self._flatten_tactile(state.get("tactile_right")),
+            )
+        )
+        full_state[42:646] = tactile[:604]
+
+        self.state_history.append(full_state.copy())
+        history = np.stack(tuple(self.state_history), axis=0)
 
         images = state.get("images", {})
         for out_key, sdk_key in (("head", "head"), ("left_wrist", "hand_left"), ("right_wrist", "hand_right")):
@@ -124,7 +147,7 @@ class MockClient:
                 self.last_images[out_key] = images[sdk_key]
         blank = np.zeros((224, 224, 3), dtype=np.uint8)
         encoded = {key: jpeg(self.last_images.get(key, blank)) for key in ("head", "left_wrist", "right_wrist")}
-        return {"type": "step_request", "timestamp": time.time(), "state": full_state.tolist()}, encoded
+        return {"type": "step_request", "timestamp": time.time(), "state": history.tolist()}, encoded
 
     def run(self):
         from wbc_gdk import WbcGdk  # noqa: F401
