@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """DinoFlow TCP inference server.
 
-The policy predicts a 50-step flow-matching chunk and consumes 30 actions
-from each chunk before requesting a new observation-conditioned chunk.
+The policy predicts a 50-step flow-matching chunk. The robot client refreshes
+the chunk after 20 control ticks and uses RTC to align the overlap.
 """
 from __future__ import annotations
 
@@ -171,7 +171,7 @@ class DinoFlowSession:
         obs: Observation,
         prev_chunk_left_over=None,
         inference_delay: int = 0,
-        execution_horizon: int = 10,
+    execution_horizon: int = 20,
     ) -> tuple[np.ndarray, float]:
         tic = time.perf_counter()
         batch = self.preprocessor(self._batch(obs))
@@ -211,7 +211,7 @@ def handle(conn: socket.socket, addr, session: DinoFlowSession) -> None:
                 obs,
                 prev_chunk_left_over=meta.get("prev_chunk_left_over"),
                 inference_delay=int(meta.get("inference_delay", 0)),
-                execution_horizon=int(meta.get("execution_horizon", 10)),
+                execution_horizon=int(meta.get("execution_horizon", 20)),
             )
             count += 1
             send_response(conn, {
@@ -219,7 +219,7 @@ def handle(conn: socket.socket, addr, session: DinoFlowSession) -> None:
                 "actions": action_chunk.tolist(),
                 "server_ms": infer_ms,
                 "horizon": 50,
-                "n_action_steps": 30,
+                "n_action_steps": 50,
                 "rtc_enabled": meta.get("prev_chunk_left_over") is not None,
                 "timestamp": time.time(),
             })
@@ -245,7 +245,7 @@ def main() -> None:
     policy, pre, post = load_policy(
         model_path,
         device,
-        n_action_steps=30,
+        n_action_steps=50,
         num_integration_steps=args.num_integration_steps,
         integration_method=args.integration_method,
     )
@@ -256,7 +256,7 @@ def main() -> None:
     server.bind((args.host, args.port))
     server.listen(1)
     print(
-        f"[serve] listening on {args.host}:{args.port} horizon=50 client_steps=30 "
+        f"[serve] listening on {args.host}:{args.port} horizon=50 client_refresh=20 "
         f"solver={args.integration_method}/{args.num_integration_steps}",
         flush=True,
     )

@@ -21,3 +21,10 @@ python deployment/client_mock.py --host 127.0.0.1 --port 9001
 
 Run the mock first. It reads robot state/cameras but does not send motor
 commands. Only use `client.py` after the robot-side safety checks are complete.
+
+The default deployment schedule predicts 50 actions, refreshes the chunk after
+20 control ticks, and applies RTC over the next 20 overlapping ticks. The
+initial inference delay is configured as 3 ticks; adjust
+`--inference-delay-steps` after checking the server's measured latency. The
+robot client enables strict sensor validation automatically. The mock can use
+the same checks with `--strict-sensors`.

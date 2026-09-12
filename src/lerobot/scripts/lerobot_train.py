@@ -44,7 +44,7 @@ from lerobot.common.train_utils import (
 from lerobot.common.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.datasets import EpisodeAwareSampler, make_dataset
+from lerobot.datasets import EpisodeAwareSampler, FixedEpisodeSampler, make_dataset
 from lerobot.envs import close_envs, make_env, make_env_pre_post_processors
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
@@ -174,12 +174,11 @@ def evaluate_validation_split(
 ) -> dict[str, float]:
     """Validate the policy on a held-out dataset split.
 
-    Computes the flow loss on a few val batches (under autocast, for
-    comparability with the training loss) plus an action-prediction eval
-    (fp32, matching deployment): sample chunks, unnormalize with the *train*
-    stats, and compare the executed first step against the ground-truth action
-    in raw radians. A "copy state" baseline is reported alongside so the user
-    can see whether the policy actually beats doing nothing (~0.006 rad).
+    Computes the flow loss under autocast plus deterministic action metrics in
+    raw radians. The fixed sampler covers the selected episodes across their
+    timelines, and the action metrics include the first step, the first 20
+    deployment steps, arm/hand groups, chunk-start jumps, temporal changes,
+    and the fraction clipped at inference.
     """
     unwrapped = accelerator.unwrap_model(policy)
     unwrapped.eval()
@@ -195,6 +194,30 @@ def evaluate_validation_split(
     n_all = 0
     base_sq_err0 = 0.0
     dl_iter = cycle(val_dataloader)
+    execution_steps = min(20, int(unwrapped.config.horizon))
+    rmse_sums = {
+        "step0": 0.0,
+        "step0_arm": 0.0,
+        "step0_hand": 0.0,
+        "execution": 0.0,
+        "execution_arm": 0.0,
+        "execution_hand": 0.0,
+        "chunk_start_jump": 0.0,
+        "velocity": 0.0,
+        "acceleration": 0.0,
+    }
+    rmse_counts = {key: 0 for key in rmse_sums}
+    mae_sums = {"all": 0.0, "arm": 0.0, "hand": 0.0}
+    mae_counts = {key: 0 for key in mae_sums}
+    clip_fraction_sum = 0.0
+
+    def accumulate_rmse(name: str, values: torch.Tensor) -> None:
+        rmse_sums[name] += float((values**2).sum())
+        rmse_counts[name] += values.numel()
+
+    def accumulate_mae(name: str, values: torch.Tensor) -> None:
+        mae_sums[name] += float(values.abs().sum())
+        mae_counts[name] += values.numel()
 
     for _ in range(n_batches):
         batch = next(dl_iter)
@@ -205,37 +228,80 @@ def evaluate_validation_split(
 
         # (a) val flow loss under autocast (same numerics as training).
         with accelerator.autocast():
-            loss, _ = unwrapped.forward(batch)
+            loss, _ = unwrapped.forward(batch, deterministic=True)
         loss_acc += float(loss.detach().float().mean())
 
         # (b) action-prediction eval in fp32.
         state_history_norm = unwrapped._state_history(batch).float()
-        state_norm = state_history_norm[:, -1, :action_dim]             # [B, D] normalized joints
         action_norm = batch[ACTION][..., :action_dim].float()          # [B, H, D] normalized
         pred_norm = unwrapped.predict_action_chunk(batch)              # [B, H, D] normalized absolute
+        clip_fraction_sum += float(getattr(unwrapped, "_last_sample_clip_fraction", 0.0))
         pred_raw = normalizer._normalize_action(pred_norm.float(), inverse=True).float().cpu()
         gt_raw = normalizer._normalize_action(action_norm, inverse=True).float().cpu()
+        obs_raw = normalizer._normalize_observation(
+            {OBS_STATE: state_history_norm[:, -1]}, inverse=True
+        )
+        state_raw = obs_raw[OBS_STATE].float().cpu()
 
         err0 = pred_raw[:, 0] - gt_raw[:, 0]
+        err_execution = pred_raw[:, :execution_steps] - gt_raw[:, :execution_steps]
+        jump = pred_raw[:, 0] - state_raw[:, :action_dim]
+
         sq_err0 += (err0**2).sum().item()
         n_step0 += err0.numel()
         abs_err_all += (pred_raw - gt_raw).abs().sum().item()
         n_all += (pred_raw - gt_raw).numel()
 
+        accumulate_rmse("step0", err0)
+        accumulate_rmse("step0_arm", err0[:, :14])
+        accumulate_rmse("step0_hand", err0[:, 14:26])
+        accumulate_rmse("execution", err_execution)
+        accumulate_rmse("execution_arm", err_execution[:, :, :14])
+        accumulate_rmse("execution_hand", err_execution[:, :, 14:26])
+        accumulate_rmse("chunk_start_jump", jump)
+        if pred_raw.shape[1] > 1:
+            accumulate_rmse("velocity", pred_raw[:, 1:] - pred_raw[:, :-1])
+        if pred_raw.shape[1] > 2:
+            accumulate_rmse(
+                "acceleration",
+                pred_raw[:, 2:] - 2 * pred_raw[:, 1:-1] + pred_raw[:, :-2],
+            )
+        accumulate_mae("all", pred_raw - gt_raw)
+        accumulate_mae("arm", pred_raw[:, :, :14] - gt_raw[:, :, :14])
+        accumulate_mae("hand", pred_raw[:, :, 14:26] - gt_raw[:, :, 14:26])
+
         # (c) copy-state baseline: current joints as the step-0 prediction.
-        obs_raw = normalizer._normalize_observation(
-            {OBS_STATE: state_history_norm[:, -1]}, inverse=True
-        )
-        state_raw = obs_raw[OBS_STATE].float().cpu()
         base_err0 = state_raw[:, :action_dim] - gt_raw[:, 0]
         base_sq_err0 += (base_err0**2).sum().item()
 
-    return {
+    metrics = {
         "val/flow_loss": loss_acc / max(n_batches, 1),
         "val/action_rmse_step0": (sq_err0 / max(n_step0, 1)) ** 0.5,
         "val/action_mae": abs_err_all / max(n_all, 1),
         "val/action_rmse_step0_copy_state": (base_sq_err0 / max(n_step0, 1)) ** 0.5,
     }
+    metrics.update(
+        {
+            "val/action_rmse_step0_arm": (rmse_sums["step0_arm"] / max(rmse_counts["step0_arm"], 1)) ** 0.5,
+            "val/action_rmse_step0_hand": (rmse_sums["step0_hand"] / max(rmse_counts["step0_hand"], 1)) ** 0.5,
+            "val/action_rmse_execution20": (rmse_sums["execution"] / max(rmse_counts["execution"], 1)) ** 0.5,
+            "val/action_rmse_execution20_arm": (rmse_sums["execution_arm"] / max(rmse_counts["execution_arm"], 1)) ** 0.5,
+            "val/action_rmse_execution20_hand": (rmse_sums["execution_hand"] / max(rmse_counts["execution_hand"], 1)) ** 0.5,
+            "val/action_rmse_chunk_start_jump": (
+                rmse_sums["chunk_start_jump"] / max(rmse_counts["chunk_start_jump"], 1)
+            )
+            ** 0.5,
+            "val/action_rmse_velocity": (rmse_sums["velocity"] / max(rmse_counts["velocity"], 1)) ** 0.5,
+            "val/action_rmse_acceleration": (
+                rmse_sums["acceleration"] / max(rmse_counts["acceleration"], 1)
+            )
+            ** 0.5,
+            "val/action_mae_arm": mae_sums["arm"] / max(mae_counts["arm"], 1),
+            "val/action_mae_hand": mae_sums["hand"] / max(mae_counts["hand"], 1),
+            "val/action_clip_fraction": clip_fraction_sum / max(n_batches, 1),
+        }
+    )
+    return metrics
 
 
 @parser.wrap()
@@ -507,11 +573,17 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         val_dataset = make_dataset(cfg, dataset_cfg=cfg.validation_dataset)
         val_bs = cfg.val_batch_size or cfg.batch_size
         val_collate_fn = lerobot_collate_fn if val_dataset.meta.has_language_columns else None
+        val_sampler = FixedEpisodeSampler(
+            val_dataset.meta.episodes["dataset_from_index"],
+            val_dataset.meta.episodes["dataset_to_index"],
+            max_frames=cfg.val_num_frames,
+            episode_indices_to_use=val_dataset.episodes,
+        )
         val_dataloader = torch.utils.data.DataLoader(
             val_dataset,
             num_workers=cfg.num_workers,
             batch_size=val_bs,
-            shuffle=True,
+            sampler=val_sampler,
             pin_memory=device.type == "cuda",
             drop_last=False,
             collate_fn=val_collate_fn,

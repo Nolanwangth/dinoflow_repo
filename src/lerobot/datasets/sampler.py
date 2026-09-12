@@ -84,3 +84,64 @@ class EpisodeAwareSampler:
 
     def __len__(self) -> int:
         return len(self.indices)
+
+
+class FixedEpisodeSampler:
+    """Deterministic, temporally spread samples for validation.
+
+    Samples are distributed across the selected episodes and uniformly across
+    each episode's timeline. This avoids a validation pass that changes every
+    time and gives short validation runs early, middle, and late examples.
+    """
+
+    def __init__(
+        self,
+        dataset_from_indices: list[int],
+        dataset_to_indices: list[int],
+        max_frames: int,
+        episode_indices_to_use: list[int] | None = None,
+    ):
+        if max_frames <= 0:
+            raise ValueError(f"max_frames must be positive, got {max_frames}")
+        if len(dataset_from_indices) != len(dataset_to_indices):
+            raise ValueError("Episode start/end index lists must have the same length")
+
+        selected = set(episode_indices_to_use) if episode_indices_to_use is not None else None
+        episodes = [
+            (episode_idx, int(start), int(end))
+            for episode_idx, (start, end) in enumerate(zip(dataset_from_indices, dataset_to_indices, strict=True))
+            if (selected is None or episode_idx in selected) and end > start
+        ]
+        if not episodes:
+            raise ValueError("No non-empty episodes remain for validation")
+
+        total_frames = sum(end - start for _, start, end in episodes)
+        target_frames = min(int(max_frames), total_frames)
+        if target_frames < len(episodes):
+            episode_positions = torch.linspace(0, len(episodes) - 1, target_frames).round().long().tolist()
+            counts = [0] * len(episodes)
+            for position in episode_positions:
+                counts[position] += 1
+        else:
+            base, remainder = divmod(target_frames, len(episodes))
+            counts = [base + (index < remainder) for index in range(len(episodes))]
+
+        indices: list[int] = []
+        for (_, start, end), count in zip(episodes, counts, strict=True):
+            if count == 0:
+                continue
+            if count == 1:
+                positions = [0.5]
+            else:
+                positions = torch.linspace(0.0, 1.0, count).tolist()
+            indices.extend(
+                start + min(end - start - 1, int(round(position * (end - start - 1))))
+                for position in positions
+            )
+        self.indices = indices
+
+    def __iter__(self) -> Iterator[int]:
+        yield from self.indices
+
+    def __len__(self) -> int:
+        return len(self.indices)

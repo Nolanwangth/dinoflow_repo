@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+from lerobot.datasets.sampler import FixedEpisodeSampler
 from lerobot.policies.dino_flow.configuration_dino_flow import DinoFlowConfig
 from lerobot.policies.dino_flow.modeling_dino_flow import (
     ActionDiT,
@@ -107,13 +108,49 @@ def test_action_dit_forward_shape():
     assert torch.isfinite(output).all()
 
 
-def test_action_dit_has_no_camera_embedding():
-    model = ActionDiT(_small_config())
-
-    assert not hasattr(model, "camera_embeddings")
+def test_camera_embedding_is_enabled_by_config():
+    # Camera embeddings live on DinoFlowPolicy, not on the action-only module.
+    config = _small_config()
+    assert config.use_camera_embedding is True
+    assert config.hidden_dim == 32
 
 
 def test_rtc_prefix_weights_fade_to_zero():
     weights = DinoFlowPolicy._rtc_prefix_weights(6, 1, 4, "cpu", torch.float32)
 
     torch.testing.assert_close(weights, torch.tensor([1.0, 1.0, 0.5, 0.0, 0.0, 0.0]))
+
+
+def test_rtc_prefix_weights_ignore_padded_previous_chunk_tail():
+    weights = DinoFlowPolicy._rtc_prefix_weights(
+        6, 0, 5, "cpu", torch.float32, available_length=2
+    )
+
+    torch.testing.assert_close(weights, torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+
+    delayed_weights = DinoFlowPolicy._rtc_prefix_weights(
+        6, 3, 6, "cpu", torch.float32, available_length=2
+    )
+    torch.testing.assert_close(delayed_weights, torch.zeros(6))
+
+
+def test_predict_action_chunk_preserves_explicit_zero_execution_horizon():
+    policy = DinoFlowPolicy.__new__(DinoFlowPolicy)
+    captured = {}
+
+    def sample(batch, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros(1, 5, 4)
+
+    policy._sample = sample
+    policy.predict_action_chunk({}, execution_horizon=0)
+
+    assert captured["execution_horizon"] == 0
+
+
+def test_fixed_episode_sampler_is_deterministic_and_temporally_spread():
+    sampler = FixedEpisodeSampler([0, 10, 25], [10, 25, 40], max_frames=9)
+
+    indices = list(sampler)
+    assert indices == [0, 4, 9, 10, 17, 24, 25, 32, 39]
+    assert indices == list(FixedEpisodeSampler([0, 10, 25], [10, 25, 40], max_frames=9))

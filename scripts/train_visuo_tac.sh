@@ -13,7 +13,7 @@ exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
   --log-freq "${DINOFLOW_LOG_FREQ:-50}" \
   --val-freq "${DINOFLOW_VAL_FREQ:-2500}" \
   --val-batch-size "${DINOFLOW_VAL_BATCH_SIZE:-8}" \
-  --val-num-frames "${DINOFLOW_VAL_NUM_FRAMES:-16}" \
+  --val-num-frames "${DINOFLOW_VAL_NUM_FRAMES:-128}" \
   --save-freq "${DINOFLOW_SAVE_FREQ:-5000}" \
   --vision-lora \
   --vision-gradient-checkpointing \

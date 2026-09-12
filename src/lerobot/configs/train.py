@@ -88,7 +88,7 @@ class TrainPipelineConfig(HubMixin):
     # Batch size for the validation dataloader. None => same as cfg.batch_size.
     val_batch_size: int | None = None
     # Total frames used for the action-prediction eval within one validation pass.
-    val_num_frames: int = 16
+    val_num_frames: int = 128
     # Set `dir` to where you would like to save all of the run outputs. If you run another training session
     # with the same value for `dir` its contents will be overwritten unless you set `resume` to true.
     output_dir: Path | None = None

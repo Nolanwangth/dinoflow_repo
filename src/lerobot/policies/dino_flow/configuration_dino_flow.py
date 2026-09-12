@@ -45,6 +45,10 @@ class DinoFlowConfig(PreTrainedConfig):
     # This is also the Action DiT width; the physical action output remains
     # ``action_dim`` (26 robot joints).
     hidden_dim: int = 256
+    # Tell the action model which camera produced each visual token.  The
+    # embeddings start at zero so checkpoints created before this field was
+    # added keep their original behavior until the new model is trained.
+    use_camera_embedding: bool = True
 
     # Keep the head at 480x768 and preserve the wrist horizontal field of view
     # with a 480x832 target.  The preprocessing resizes to target height and

@@ -37,6 +37,9 @@ from client_mock import (
 
 class RobotClient(MockClient):
     def __init__(self, host, port, hz, **kwargs):
+        # The robot client must fail loudly on a missing or malformed sensor;
+        # the mock client keeps its permissive mode for SDK smoke tests.
+        kwargs.setdefault("strict_sensors", True)
         super().__init__(host, port, hz, **kwargs)
         self.previous_arm_target = None
 
@@ -48,21 +51,30 @@ class RobotClient(MockClient):
         sock = socket.create_connection((self.host, self.port), timeout=10)
         self.sock = sock
         print(f"[client] connected to {self.host}:{self.port}", flush=True)
+        next_tick = time.monotonic()
         try:
             while True:
-                meta, images = self.observation()
+                request_due = self._request_is_due()
+                meta, images = self.observation(
+                    read_images=request_due,
+                    encode_images=request_due,
+                )
                 with self.lock:
                     need = self.current_chunk is None or self.current_idx >= self.chunk_refresh_steps
                     previous = None
                     if self.rtc_enabled and self.current_chunk is not None and self.current_idx < len(self.current_chunk):
                         previous = self.current_chunk[self.current_idx:].tolist()
                 if need and not self.request_inflight:
+                    if not images:
+                        images = self._encode_images()
                     self._request_async(meta, images, previous)
                 action = self._next_action()
                 if action is None:
-                    time.sleep(self.dt)
+                    next_tick = self._wait_for_tick(next_tick)
                     continue
-                arm = np.asarray(self.wbc.get_arm_joints(), dtype=np.float64)
+                # Reuse the arm feedback from this observation. An additional
+                # SDK read here would add jitter to the 30 Hz control period.
+                arm = np.asarray(self.current_arm, dtype=np.float64).copy()
                 if arm.shape != (14,) or not np.isfinite(arm).all():
                     raise RuntimeError(f"invalid arm feedback: shape={arm.shape}")
                 raw_arm_target = np.asarray(action[:14], dtype=np.float64)
@@ -80,7 +92,7 @@ class RobotClient(MockClient):
                 self.previous_arm_target = arm_target.copy()
                 self.wbc.move_arm(arm_target.tolist())
                 self.wbc.move_hand(action[14:26].tolist())
-                time.sleep(self.dt)
+                next_tick = self._wait_for_tick(next_tick)
         finally:
             sock.close()
             self.wbc.shutdown()
@@ -103,6 +115,9 @@ class RobotClient(MockClient):
                     raise RuntimeError(f"invalid action chunk {actions.shape}")
                 delay = max(0, self.exec_counter - request_start)
                 with self.lock:
+                    # Follow the measured pipeline delay on the next request
+                    # so RTC remains aligned when server latency changes.
+                    self.inference_delay_steps = min(delay, 49)
                     new_chunk = actions[min(delay, 49):]
                     old_chunk = None
                     if self.current_chunk is not None and self.current_idx < len(self.current_chunk):
@@ -141,9 +156,9 @@ def main():
     )
     parser.add_argument("--rtc", dest="rtc_enabled", action="store_true", default=True)
     parser.add_argument("--no-rtc", dest="rtc_enabled", action="store_false")
-    parser.add_argument("--chunk-refresh-steps", type=int, default=10)
-    parser.add_argument("--rtc-execution-horizon", type=int, default=10)
-    parser.add_argument("--chunk-blend-steps", type=int, default=10)
+    parser.add_argument("--chunk-refresh-steps", type=int, default=20)
+    parser.add_argument("--rtc-execution-horizon", type=int, default=20)
+    parser.add_argument("--chunk-blend-steps", type=int, default=0)
     parser.add_argument("--inference-delay-steps", type=int, default=3)
     args = parser.parse_args()
     RobotClient(
