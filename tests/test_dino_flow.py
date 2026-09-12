@@ -1,6 +1,8 @@
+import numpy as np
 import torch
 from torch import nn
 
+from deployment.client_mock import ACTION_HORIZON, CONTROL_DT, MockClient
 from lerobot.datasets.sampler import FixedEpisodeSampler
 from lerobot.policies.dino_flow.configuration_dino_flow import DinoFlowConfig
 from lerobot.policies.dino_flow.modeling_dino_flow import (
@@ -154,3 +156,34 @@ def test_fixed_episode_sampler_is_deterministic_and_temporally_spread():
     indices = list(sampler)
     assert indices == [0, 4, 9, 10, 17, 24, 25, 32, 39]
     assert indices == list(FixedEpisodeSampler([0, 10, 25], [10, 25, 40], max_frames=9))
+
+
+def test_deployment_history_grid_stays_at_training_rate():
+    client = MockClient("127.0.0.1", 0, hz=10)
+    client.state_samples.extend(
+        (index / 10.0, np.full(646, index, dtype=np.float32)) for index in range(6)
+    )
+
+    _, target_times, source_times, source_reuse = client._resampled_state_history(0.5)
+
+    np.testing.assert_allclose(np.diff(target_times), CONTROL_DT)
+    assert all(source <= target for source, target in zip(source_times, target_times, strict=True))
+    assert max(source_reuse) > 1
+
+
+def test_deployment_drops_chunks_that_are_older_than_the_action_window():
+    client = MockClient("127.0.0.1", 0, hz=30)
+    old_chunk = np.full((30, 26), -1.0, dtype=np.float32)
+    client.current_chunk = old_chunk.copy()
+    client.current_idx = 20
+    client.exec_counter = 3
+    actions = np.zeros((ACTION_HORIZON, 26), dtype=np.float32)
+
+    consumed, age, stale = client._install_action_chunk(
+        actions, request_start_exec=0, observation_time=0.0, response_time=2.0
+    )
+
+    assert consumed == 3
+    assert age == 2.0
+    assert stale is True
+    np.testing.assert_array_equal(client.current_chunk, old_chunk)

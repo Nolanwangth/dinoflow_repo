@@ -22,6 +22,9 @@ import numpy as np
 import ujson
 from PIL import Image
 
+CONTROL_HZ = 30.0
+CONTROL_DT = 1.0 / CONTROL_HZ
+ACTION_HORIZON = 50
 CHUNK_REFRESH_STEPS = 20
 RTC_EXECUTION_HORIZON = 20
 CHUNK_BLEND_STEPS = 0
@@ -82,7 +85,10 @@ class MockClient:
         inference_delay_steps=INFERENCE_DELAY_STEPS,
         strict_sensors=False,
     ):
-        self.host, self.port, self.dt = host, port, 1.0 / hz
+        self.host, self.port, self.hz = host, port, float(hz)
+        if self.hz <= 0:
+            raise ValueError(f"hz must be positive, got {hz}")
+        self.dt = 1.0 / self.hz
         self.last_images = {}
         self.max_arm_step_rad = max_arm_step_rad
         if not 0.0 < arm_ema_alpha <= 1.0:
@@ -141,20 +147,35 @@ class MockClient:
             raise RuntimeError(f"missing camera frames: {missing}")
         return {key: jpeg(self.last_images.get(key, blank)) for key in ("head", "left_wrist", "right_wrist")}
 
-    def _resampled_state_history(self, now: float) -> tuple[np.ndarray, list[float]]:
+    def _resampled_state_history(
+        self, now: float
+    ) -> tuple[np.ndarray, list[float], list[float], list[int]]:
         samples = tuple(self.state_samples)
         if not samples:
             raise RuntimeError("state history is empty")
-        target_times = [now - (5 - index) * self.dt for index in range(6)]
+        # Training always samples the six state frames at 30 Hz. Keep this
+        # grid independent from the client control rate so --hz cannot change
+        # the model's temporal receptive field.
+        target_times = [now - (5 - index) * CONTROL_DT for index in range(6)]
         history = []
+        source_times = []
+        source_indices = []
         for target in target_times:
             selected = samples[0][1]
-            for sample_time, sample in reversed(samples):
+            selected_time = samples[0][0]
+            selected_index = 0
+            for sample_index, (sample_time, sample) in reversed(list(enumerate(samples))):
                 if sample_time <= target:
                     selected = sample
+                    selected_time = sample_time
+                    selected_index = sample_index
                     break
             history.append(selected)
-        return np.stack(history, axis=0), target_times
+            source_times.append(selected_time)
+            source_indices.append(selected_index)
+        source_use_count = {index: source_indices.count(index) for index in set(source_indices)}
+        source_reuse = [source_use_count[index] for index in source_indices]
+        return np.stack(history, axis=0), target_times, source_times, source_reuse
 
     def observation(self, read_images: bool = True, encode_images: bool = True):
         from wbc_gdk import WbcGdk
@@ -211,7 +232,7 @@ class MockClient:
         )
         self.last_observation_time = now
         self.state_samples.append((now, full_state.copy()))
-        history, history_timestamps = self._resampled_state_history(now)
+        history, history_timestamps, source_timestamps, source_reuse = self._resampled_state_history(now)
 
         if read_images:
             images = state.get("images", {})
@@ -228,7 +249,9 @@ class MockClient:
             "timestamp": time.time(),
             "observation_monotonic": now,
             "observation_interval": observation_interval,
-            "state_timestamps": history_timestamps,
+            "state_target_timestamps": history_timestamps,
+            "state_source_timestamps": source_timestamps,
+            "state_source_reuse": source_reuse,
             "state": history.tolist(),
         }, encoded
 
@@ -250,6 +273,44 @@ class MockClient:
             # from the current time instead of spinning to catch up.
             next_tick = now
         return next_tick
+
+    def _install_action_chunk(
+        self,
+        actions: np.ndarray,
+        request_start_exec: int,
+        observation_time: float,
+        response_time: float | None = None,
+    ) -> tuple[int, float, bool]:
+        """Install a response using both wall-clock age and consumed actions.
+
+        ``consumed_steps`` determines which action in the new chunk is next.
+        The wall-clock age detects a stale observation even when the control
+        loop was blocked and therefore did not consume any old actions.
+        """
+        if response_time is None:
+            response_time = time.monotonic()
+        observation_age = max(0.0, response_time - observation_time)
+        with self.lock:
+            consumed_steps = max(0, self.exec_counter - request_start_exec)
+            self.inference_delay_steps = min(consumed_steps, ACTION_HORIZON - 1)
+            stale = (
+                consumed_steps >= ACTION_HORIZON
+                or observation_age >= ACTION_HORIZON * CONTROL_DT
+            )
+            if not stale:
+                # Slicing by the actual number of consumed old actions keeps
+                # the replacement aligned even if the control loop stalled.
+                new_chunk = actions[consumed_steps:]
+                old_chunk = None
+                if self.current_chunk is not None and self.current_idx < len(self.current_chunk):
+                    old_chunk = self.current_chunk[self.current_idx:].copy()
+                if old_chunk is not None and len(old_chunk) > 0:
+                    overlap = min(self.chunk_blend_steps, len(old_chunk), len(new_chunk))
+                    w = np.linspace(0.15, 1.0, overlap, dtype=np.float32)[:, None]
+                    new_chunk[:overlap] = old_chunk[:overlap] * (1.0 - w) + new_chunk[:overlap] * w
+                self.current_chunk = new_chunk
+                self.current_idx = 0
+        return consumed_steps, observation_age, stale
 
     def run(self):
         from wbc_gdk import WbcGdk  # noqa: F401
@@ -282,47 +343,50 @@ class MockClient:
                 self.wbc.shutdown()
 
     def _request_async(self, meta, images, previous):
-        self.request_inflight = True
-        request_start = self.exec_counter
+        with self.lock:
+            if self.request_inflight:
+                return
+            self.request_inflight = True
+            request_start_exec = self.exec_counter
+            predicted_delay = self.inference_delay_steps
         request = dict(meta)
         # At 30 Hz the normal warmed-up server latency is about 2--3 control
         # ticks.  RTC uses this to align the old prefix with the time at which
         # the new chunk becomes available.
-        request["inference_delay"] = self.inference_delay_steps
+        request["inference_delay"] = predicted_delay
         request["execution_horizon"] = self.rtc_execution_horizon
         request["prev_chunk_left_over"] = previous
 
         def worker():
             try:
+                request_send_time = time.monotonic()
                 send_frame(self.sock, request, images)
                 response = recv_response(self.sock)
                 actions = np.asarray(response["actions"], dtype=np.float32)
-                if actions.shape != (50, 26) or not np.isfinite(actions).all():
+                if actions.shape != (ACTION_HORIZON, 26) or not np.isfinite(actions).all():
                     raise RuntimeError(f"invalid action chunk {actions.shape}")
-                delay = max(0, self.exec_counter - request_start)
-                with self.lock:
-                    # Use the measured delay as the prediction for the next
-                    # request. The first request uses the CLI warm-up value;
-                    # subsequent RTC calls follow the actual 30 Hz pipeline.
-                    self.inference_delay_steps = min(delay, 49)
-                    new_chunk = actions[min(delay, 49):]
-                    old_chunk = None
-                    if self.current_chunk is not None and self.current_idx < len(self.current_chunk):
-                        old_chunk = self.current_chunk[self.current_idx:].copy()
-                    if old_chunk is not None and len(old_chunk) > 0:
-                        overlap = min(self.chunk_blend_steps, len(old_chunk), len(new_chunk))
-                        # Keep the currently executing trajectory initially,
-                        # then hand control to the new observation-conditioned
-                        # chunk over 10 ticks.
-                        w = np.linspace(0.15, 1.0, overlap, dtype=np.float32)[:, None]
-                        new_chunk[:overlap] = old_chunk[:overlap] * (1.0 - w) + new_chunk[:overlap] * w
-                    self.current_chunk = new_chunk
-                    self.current_idx = 0
-                print(f"[mock] chunk=50 server={response.get('server_ms', -1):.1f}ms delay={delay} rtc={response.get('rtc_enabled')}", flush=True)
+                observation_time = float(meta.get("observation_monotonic", request_send_time))
+                consumed, age, stale = self._install_action_chunk(
+                    actions, request_start_exec, observation_time
+                )
+                if stale:
+                    print(
+                        f"[mock] dropped stale chunk age={age * 1000.0:.1f}ms "
+                        f"consumed={consumed} server={response.get('server_ms', -1):.1f}ms",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[mock] chunk=50 server={response.get('server_ms', -1):.1f}ms "
+                        f"age={age * 1000.0:.1f}ms consumed={consumed} "
+                        f"rtc={response.get('rtc_enabled')}",
+                        flush=True,
+                    )
             except Exception as exc:
                 print(f"[mock] request failed: {exc}", flush=True)
             finally:
-                self.request_inflight = False
+                with self.lock:
+                    self.request_inflight = False
 
         threading.Thread(target=worker, daemon=True).start()
 

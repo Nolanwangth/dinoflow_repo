@@ -203,8 +203,8 @@ def evaluate_validation_split(
         "execution_arm": 0.0,
         "execution_hand": 0.0,
         "chunk_start_jump": 0.0,
-        "velocity": 0.0,
-        "acceleration": 0.0,
+        "action_diff": 0.0,
+        "action_second_diff": 0.0,
     }
     rmse_counts = {key: 0 for key in rmse_sums}
     mae_sums = {"all": 0.0, "arm": 0.0, "hand": 0.0}
@@ -260,10 +260,10 @@ def evaluate_validation_split(
         accumulate_rmse("execution_hand", err_execution[:, :, 14:26])
         accumulate_rmse("chunk_start_jump", jump)
         if pred_raw.shape[1] > 1:
-            accumulate_rmse("velocity", pred_raw[:, 1:] - pred_raw[:, :-1])
+            accumulate_rmse("action_diff", pred_raw[:, 1:] - pred_raw[:, :-1])
         if pred_raw.shape[1] > 2:
             accumulate_rmse(
-                "acceleration",
+                "action_second_diff",
                 pred_raw[:, 2:] - 2 * pred_raw[:, 1:-1] + pred_raw[:, :-2],
             )
         accumulate_mae("all", pred_raw - gt_raw)
@@ -291,9 +291,9 @@ def evaluate_validation_split(
                 rmse_sums["chunk_start_jump"] / max(rmse_counts["chunk_start_jump"], 1)
             )
             ** 0.5,
-            "val/action_rmse_velocity": (rmse_sums["velocity"] / max(rmse_counts["velocity"], 1)) ** 0.5,
-            "val/action_rmse_acceleration": (
-                rmse_sums["acceleration"] / max(rmse_counts["acceleration"], 1)
+            "val/action_diff_rms": (rmse_sums["action_diff"] / max(rmse_counts["action_diff"], 1)) ** 0.5,
+            "val/action_second_diff_rms": (
+                rmse_sums["action_second_diff"] / max(rmse_counts["action_second_diff"], 1)
             )
             ** 0.5,
             "val/action_mae_arm": mae_sums["arm"] / max(mae_counts["arm"], 1),

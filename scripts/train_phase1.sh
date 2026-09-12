@@ -35,6 +35,7 @@ DINOFLOW_OPTIMIZER_LR="${DINOFLOW_OPTIMIZER_LR:-1e-4}"
 DINOFLOW_SCHEDULER_DECAY_LR="${DINOFLOW_SCHEDULER_DECAY_LR:-1e-5}"
 DINOFLOW_WEIGHT_DECAY="${DINOFLOW_WEIGHT_DECAY:-1e-6}"
 DINOFLOW_WANDB_ENABLE="${DINOFLOW_WANDB_ENABLE:-false}"
+DINOFLOW_WANDB_PROJECT="${DINOFLOW_WANDB_PROJECT:-splice_wires_dinoflow}"
 DINOFLOW_SAVE_CHECKPOINT="${DINOFLOW_SAVE_CHECKPOINT:-true}"
 DINOFLOW_USE_DELTA_ACTION="${DINOFLOW_USE_DELTA_ACTION:-false}"
 DINOFLOW_SEED="${DINOFLOW_SEED:-1000}"
@@ -224,7 +225,7 @@ exec python -m lerobot.scripts.lerobot_train \
   --val_num_frames "$DINOFLOW_VAL_NUM_FRAMES" \
   --save_checkpoint "$DINOFLOW_SAVE_CHECKPOINT" \
   --wandb.enable "$DINOFLOW_WANDB_ENABLE" \
-  --wandb.project splice_wires_dinoflow \
+  --wandb.project "$DINOFLOW_WANDB_PROJECT" \
   --wandb.disable_artifact true \
   --wandb.add_tags true \
   --seed "$DINOFLOW_SEED"

@@ -26,4 +26,5 @@ exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
   --save-checkpoint \
   --absolute-action \
   --output-dir "$DINOFLOW_OUTPUT_DIR" \
-  --job-name "$DINOFLOW_JOB_NAME"
+  --job-name "$DINOFLOW_JOB_NAME" \
+  "$@"

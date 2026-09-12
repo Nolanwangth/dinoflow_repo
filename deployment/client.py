@@ -98,41 +98,49 @@ class RobotClient(MockClient):
             self.wbc.shutdown()
 
     def _request_async(self, meta, images, previous):
-        self.request_inflight = True
-        request_start = self.exec_counter
+        with self.lock:
+            if self.request_inflight:
+                return
+            self.request_inflight = True
+            request_start_exec = self.exec_counter
+            predicted_delay = self.inference_delay_steps
         request = dict(meta)
-        # Approximate the warmed-up 30 Hz inference delay (about 3 ticks).
-        request["inference_delay"] = self.inference_delay_steps
+        # This is only the predicted consumed-action delay. The response path
+        # measures the actual wall-clock age and consumed action count.
+        request["inference_delay"] = predicted_delay
         request["execution_horizon"] = self.rtc_execution_horizon
         request["prev_chunk_left_over"] = previous
 
         def worker():
             try:
+                request_send_time = time.monotonic()
                 send_frame(self.sock, request, images)
                 response = recv_response(self.sock)
                 actions = np.asarray(response["actions"], dtype=np.float32)
                 if actions.shape != (50, 26) or not np.isfinite(actions).all():
                     raise RuntimeError(f"invalid action chunk {actions.shape}")
-                delay = max(0, self.exec_counter - request_start)
-                with self.lock:
-                    # Follow the measured pipeline delay on the next request
-                    # so RTC remains aligned when server latency changes.
-                    self.inference_delay_steps = min(delay, 49)
-                    new_chunk = actions[min(delay, 49):]
-                    old_chunk = None
-                    if self.current_chunk is not None and self.current_idx < len(self.current_chunk):
-                        old_chunk = self.current_chunk[self.current_idx:].copy()
-                    if old_chunk is not None and len(old_chunk) > 0:
-                        overlap = min(self.chunk_blend_steps, len(old_chunk), len(new_chunk))
-                        w = np.linspace(0.15, 1.0, overlap, dtype=np.float32)[:, None]
-                        new_chunk[:overlap] = old_chunk[:overlap] * (1.0 - w) + new_chunk[:overlap] * w
-                    self.current_chunk = new_chunk
-                    self.current_idx = 0
-                print(f"[client] chunk=50 server={response.get('server_ms', -1):.1f}ms delay={delay} rtc={response.get('rtc_enabled')}", flush=True)
+                observation_time = float(meta.get("observation_monotonic", request_send_time))
+                consumed, age, stale = self._install_action_chunk(
+                    actions, request_start_exec, observation_time
+                )
+                if stale:
+                    print(
+                        f"[client] dropped stale chunk age={age * 1000.0:.1f}ms "
+                        f"consumed={consumed} server={response.get('server_ms', -1):.1f}ms",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[client] chunk=50 server={response.get('server_ms', -1):.1f}ms "
+                        f"age={age * 1000.0:.1f}ms consumed={consumed} "
+                        f"rtc={response.get('rtc_enabled')}",
+                        flush=True,
+                    )
             except Exception as exc:
                 print(f"[client] request failed: {exc}", flush=True)
             finally:
-                self.request_inflight = False
+                with self.lock:
+                    self.request_inflight = False
 
         threading.Thread(target=worker, daemon=True).start()
 
