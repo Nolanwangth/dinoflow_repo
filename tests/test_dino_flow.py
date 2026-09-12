@@ -29,6 +29,7 @@ def test_dino_flow_config_defaults_are_valid_without_dataset_features():
     assert config.type == "dino_flow"
     assert config.drop_n_last_frames == 0
     assert config.action_delta_indices == [0, 1, 2, 3, 4]
+    assert config.use_delta_action is False
 
 
 def test_default_camera_targets_preserve_wrist_width():

@@ -23,5 +23,6 @@ exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
   --optimizer-lr "${DINOFLOW_OPTIMIZER_LR:-1e-4}" \
   --wandb \
   --save-checkpoint \
+  --absolute-action \
   --output-dir "$DINOFLOW_OUTPUT_DIR" \
   --job-name "$DINOFLOW_JOB_NAME"

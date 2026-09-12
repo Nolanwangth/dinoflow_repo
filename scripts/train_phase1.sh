@@ -36,7 +36,7 @@ DINOFLOW_SCHEDULER_DECAY_LR="${DINOFLOW_SCHEDULER_DECAY_LR:-1e-5}"
 DINOFLOW_WEIGHT_DECAY="${DINOFLOW_WEIGHT_DECAY:-1e-6}"
 DINOFLOW_WANDB_ENABLE="${DINOFLOW_WANDB_ENABLE:-false}"
 DINOFLOW_SAVE_CHECKPOINT="${DINOFLOW_SAVE_CHECKPOINT:-true}"
-DINOFLOW_USE_DELTA_ACTION="${DINOFLOW_USE_DELTA_ACTION:-true}"
+DINOFLOW_USE_DELTA_ACTION="${DINOFLOW_USE_DELTA_ACTION:-false}"
 DINOFLOW_SEED="${DINOFLOW_SEED:-1000}"
 
 usage() {
@@ -81,7 +81,7 @@ usage() {
   --save-checkpoint               保存 checkpoint（默认）
   --no-save-checkpoint            不保存 checkpoint
   --delta-action / --absolute-action
-                                  使用 delta/absolute action，默认 delta
+                                  使用 delta/absolute action，默认 absolute
   -h, --help                      显示帮助
 
 也可以通过同名 DINOFLOW_* 环境变量覆盖默认值。

@@ -67,11 +67,9 @@ class DinoFlowConfig(PreTrainedConfig):
     clip_sample: bool = True
     clip_sample_range: float = 1.0
 
-    # Regress on delta = action_norm - state_norm instead of absolute action_norm.
-    # The first chunk step is then ~0 (action == current pose for a smooth task),
-    # which is far better conditioned than predicting absolute joint angles and
-    # directly anchors the executed first step to the observed state.
-    use_delta_action: bool = True
+    # Regress directly on normalized absolute actions.  Delta action remains
+    # available as an opt-in mode for compatible training and deployment.
+    use_delta_action: bool = False
 
     # Non-zero floor for the cosine decay so the run doesn't starve LR to ~0
     # (the diffusers "cosine" preset decays all the way to zero).
