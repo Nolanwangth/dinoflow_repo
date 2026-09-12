@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DINOFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DINOFLOW_OUTPUT_DIR="${DINOFLOW_OUTPUT_DIR:-$DINOFLOW_ROOT/outputs/visuo_tac_phase1_force_tactile_history6_lora_qv_r8_b32_lr1e-4_lora2e-5_30k_seed1000}"
+DINOFLOW_OUTPUT_DIR="${DINOFLOW_OUTPUT_DIR:-$DINOFLOW_ROOT/outputs/visuo_tac_phase1_force_tactile_history6_absolute_action_lora_qv_r8_b32_lr1e-4_lora2e-5_30k_seed1000}"
 DINOFLOW_JOB_NAME="${DINOFLOW_JOB_NAME:-$(basename "$DINOFLOW_OUTPUT_DIR")}"
 
 exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
