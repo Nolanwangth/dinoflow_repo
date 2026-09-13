@@ -14,8 +14,11 @@
 - DINO：Q/V LoRA 微调，rank `8`、alpha `16`、dropout `0`、lr `2e-5`；其余 DINO 权重冻结；gradient checkpointing 开启
 - 优化：Adam，Action DiT lr `1e-4`，weight decay `1e-6`，cosine scheduler 最低 lr `1e-5`，warmup `500` 步，bf16
 - 训练：batch `32`，workers `12`，目标 `30000` steps；每 `1000` steps 验证，每次采样 `128` 帧，每 `5000` steps 保存
-- W&B project：`splice_wires_dinoflow`；建议用包含 `visuo_baseline_absolute_h256` 的 job name 区分此基线
+- W&B project：`splice_wires_dinoflow`；job name：`visuo_baseline_phase1_absolute_h256_camid_fullpatch_loraqv_r8_b32_30k_seed1000`
 - smoke test：真实数据 1 step 已通过，DINO Q/V LoRA 已成功加载，训练前向/反向完成
+- 正式训练 W&B：[kou0rfsb](https://wandb.ai/nolanwangth-karlsruhe-institute-of-technology/splice_wires_dinoflow/runs/kou0rfsb)
+- 正式输出：`outputs/visuo_baseline_phase1_absolute_h256_camid_fullpatch_loraqv_r8_b32_30k_seed1000_20260913/`
+- 启动后速度约 `1.3–1.4 step/s`，预计约 6 小时；首次 validation 在 step `1000`，首次 checkpoint 在 step `5000`
 
 该实验配置是当前文档中的有效 baseline。下面保留此前 512 hidden、delta action 的历史记录，便于追溯，不作为本次比较基线。
 
@@ -54,10 +57,10 @@
 - gradient checkpointing batch 探测：`32/64/128` 均通过；正式训练采用 batch `32`
 - checkpoint 保存、严格重载测试：通过
 
-## 当前训练
+## 历史训练记录（2026-09-11）
 
 - 模型：DINOv3-S+/16 + Q/V LoRA + Full Patch Tokens + Action DiT
-- 状态：运行中，约 step `2150/30000`
+- 状态：历史记录，约 step `2150/30000`
 - W&B：[nhcgw57h](https://wandb.ai/nolanwangth-karlsruhe-institute-of-technology/splice_wires_dinoflow/runs/nhcgw57h)
 
 输出目录：`outputs/visuo-basline_phase1_wrist832_lora_qv_r8_b32_lr1e-4_lora2e-5_30k_seed1000/`
