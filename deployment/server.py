@@ -122,6 +122,71 @@ class DinoFlowSession:
         self.action_normalizer = next(
             (step for step in preprocessor.steps if isinstance(step, NormalizerProcessorStep)), None
         )
+        self._state_diagnostic_count = 0
+        self._state_stats = None
+        if self.action_normalizer is not None:
+            self._state_stats = self.action_normalizer._tensor_stats.get(OBS_STATE)
+
+    def _diagnose_state_input(self, state_history: np.ndarray) -> None:
+        """Report deployment values that are outside the training state support.
+
+        In particular, a MIN_MAX feature with ``min == max`` has no usable
+        scale.  The normalizer keeps that feature at its training encoding,
+        while this diagnostic still reports whether the robot is producing a
+        value that was never present during training.
+        """
+        stats = self._state_stats
+        if stats is None or "min" not in stats or "max" not in stats:
+            return
+
+        min_val = stats["min"].detach().float().cpu().numpy().reshape(-1)
+        max_val = stats["max"].detach().float().cpu().numpy().reshape(-1)
+        values = np.asarray(state_history, dtype=np.float32)
+        if values.ndim == 1:
+            values = values[None, :]
+        if values.shape[-1] != min_val.shape[0]:
+            return
+
+        self._state_diagnostic_count += 1
+        degenerate = np.abs(max_val - min_val) < float(self.action_normalizer.eps)
+        tolerance = max(float(self.action_normalizer.eps) * 10.0, 1e-5)
+        zero_range_nonzero = np.abs(values[:, degenerate] - min_val[degenerate]) > tolerance
+        nondegenerate = ~degenerate
+        outside = (
+            (values[:, nondegenerate] < min_val[nondegenerate] - tolerance)
+            | (values[:, nondegenerate] > max_val[nondegenerate] + tolerance)
+        )
+
+        safe_denom = np.where(degenerate, 1.0, max_val - min_val)
+        normalized = 2.0 * (values - min_val) / safe_denom - 1.0
+        normalized[:, degenerate] = -1.0
+
+        should_log = self._state_diagnostic_count == 1 or self._state_diagnostic_count % 30 == 0
+        if not should_log:
+            return
+
+        bad_zero_indices = np.flatnonzero(
+            degenerate & np.any(np.abs(values - min_val) > tolerance, axis=0)
+        )
+        tactile_degenerate = degenerate[42:646]
+        tactile_bad = np.flatnonzero(
+            tactile_degenerate
+            & np.any(np.abs(values[:, 42:646] - min_val[42:646]) > tolerance, axis=0)
+        )
+        force_norm = normalized[:, 30:42] if normalized.shape[1] >= 42 else np.empty(0)
+        force_max = float(np.max(np.abs(force_norm))) if force_norm.size else float("nan")
+        print(
+            "[input] state_norm "
+            f"abs_max={float(np.max(np.abs(normalized))):.3g} "
+            f"range_violations={int(outside.sum())}/{outside.size} "
+            f"zero_range={int(degenerate.sum())} "
+            f"zero_range_nonzero={int(zero_range_nonzero.sum())} "
+            f"zero_range_indices={bad_zero_indices[:12].tolist()} "
+            f"tactile_zero_nonzero={int(tactile_bad.size)} "
+            f"tactile_indices={tactile_bad[:12].tolist()} "
+            f"force_norm_abs_max={force_max:.3g}",
+            flush=True,
+        )
 
     @staticmethod
     def _decode(data: bytes) -> torch.Tensor:
@@ -171,10 +236,12 @@ class DinoFlowSession:
         obs: Observation,
         prev_chunk_left_over=None,
         inference_delay: int = 0,
-    execution_horizon: int = 20,
+        execution_horizon: int = 20,
     ) -> tuple[np.ndarray, float]:
         tic = time.perf_counter()
-        batch = self.preprocessor(self._batch(obs))
+        raw_batch = self._batch(obs)
+        self._diagnose_state_input(raw_batch[OBS_STATE][0].numpy())
+        batch = self.preprocessor(raw_batch)
         # Always generate the complete 50-step chunk. The client decides
         # how many actions to execute.
         previous = self._normalize_previous_actions(prev_chunk_left_over)

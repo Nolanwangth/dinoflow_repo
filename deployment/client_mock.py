@@ -30,6 +30,8 @@ RTC_EXECUTION_HORIZON = 20
 CHUNK_BLEND_STEPS = 0
 INFERENCE_DELAY_STEPS = 3
 TACTILE_REGION_LENGTHS = (35, 60, 60, 60, 32, 55)
+RIGHT_FORCE_SLICE = slice(6, 12)
+FORCE_CALIBRATION_FRAMES = 30
 ROBOT_ROOT = os.environ.get("DINOFLOW_ROBOT_ROOT")
 if ROBOT_ROOT:
     ROBOT_ROOT_PATH = Path(ROBOT_ROOT).expanduser().resolve()
@@ -84,6 +86,7 @@ class MockClient:
         chunk_blend_steps=CHUNK_BLEND_STEPS,
         inference_delay_steps=INFERENCE_DELAY_STEPS,
         strict_sensors=False,
+        force_calibration_frames=FORCE_CALIBRATION_FRAMES,
     ):
         self.host, self.port, self.hz = host, port, float(hz)
         if self.hz <= 0:
@@ -100,6 +103,8 @@ class MockClient:
         self.chunk_blend_steps = max(0, int(chunk_blend_steps))
         self.inference_delay_steps = max(0, int(inference_delay_steps))
         self.strict_sensors = bool(strict_sensors)
+        self.force_calibration_frames = max(0, int(force_calibration_frames))
+        self.right_force_baseline = None
         self.previous_arm_target = None
         self.current_arm = None
         self.sock = None
@@ -112,6 +117,50 @@ class MockClient:
         # Keep a little more than six raw samples so an irregular host loop
         # can still construct the six states at nominal 30 Hz offsets.
         self.state_samples = deque(maxlen=32)
+
+    def _read_hand_force(self, state: dict, *, context: str) -> np.ndarray | None:
+        """Read the 12-D force vector with the training-data layout."""
+        force = np.asarray(state.get("hand_force", []), dtype=np.float32).reshape(-1)
+        if force.size != 12:
+            if self.strict_sensors:
+                raise RuntimeError(f"{context}: hand_force length={force.size}, expected 12")
+            return None
+        if not np.isfinite(force).all():
+            raise RuntimeError(f"{context}: hand_force contains NaN or Inf")
+        return force
+
+    def _calibrate_right_force(self) -> None:
+        """Estimate the right-wrist offset before the policy starts moving."""
+        if self.force_calibration_frames == 0:
+            self.right_force_baseline = np.zeros(6, dtype=np.float32)
+            print("[force] right-wrist baseline calibration disabled", flush=True)
+            return
+
+        samples = []
+        print(
+            f"[force] calibrating right-wrist baseline from "
+            f"{self.force_calibration_frames} samples; keep robot still",
+            flush=True,
+        )
+        while len(samples) < self.force_calibration_frames:
+            tic = time.monotonic()
+            state = self.wbc.read_state(include_images=False)
+            force = self._read_hand_force(state, context="force calibration")
+            if force is None:
+                raise RuntimeError("force calibration requires a valid 12-D hand_force sample")
+            samples.append(force[RIGHT_FORCE_SLICE].copy())
+            remaining = CONTROL_DT - (time.monotonic() - tic)
+            if remaining > 0:
+                time.sleep(remaining)
+
+        self.right_force_baseline = np.median(
+            np.stack(samples, axis=0), axis=0
+        ).astype(np.float32)
+        print(
+            "[force] right-wrist baseline="
+            + np.array2string(self.right_force_baseline, precision=5, separator=", "),
+            flush=True,
+        )
 
     def _flatten_tactile(self, value, sensor_name: str) -> np.ndarray:
         """Flatten six GDK finger regions into the 302-value hand layout."""
@@ -183,6 +232,8 @@ class MockClient:
         if not hasattr(self, "wbc"):
             self.wbc = WbcGdk(cameras=["head", "hand_left", "hand_right"])
             time.sleep(1.0)
+        if self.right_force_baseline is None:
+            self._calibrate_right_force()
         state = self.wbc.read_state(include_images=read_images)
         arm_feedback = np.asarray(state["arm_joints"], dtype=np.float64).reshape(-1)
         if self.strict_sensors and arm_feedback.size != 14:
@@ -211,13 +262,11 @@ class MockClient:
         if not np.isfinite(auxiliary).all():
             raise RuntimeError("head/waist joints contains NaN or Inf")
         full_state[26:30] = auxiliary[:4]
-        force = np.asarray(state.get("hand_force", []), dtype=np.float32).reshape(-1)
-        if self.strict_sensors and force.size != 12:
-            raise RuntimeError(f"hand_force length={force.size}, expected 12")
-        if not np.isfinite(force).all():
-            raise RuntimeError("hand_force contains NaN or Inf")
-        if force.size == 12:
-            full_state[30:42] = force
+        force = self._read_hand_force(state, context="observation")
+        if force is not None:
+            corrected_force = force.copy()
+            corrected_force[RIGHT_FORCE_SLICE] -= self.right_force_baseline
+            full_state[30:42] = corrected_force
         tactile = np.concatenate(
             (
                 self._flatten_tactile(state.get("tactile_left"), "left"),
@@ -413,6 +462,12 @@ def main():
     parser.add_argument("--rtc-execution-horizon", type=int, default=20)
     parser.add_argument("--chunk-blend-steps", type=int, default=0)
     parser.add_argument("--inference-delay-steps", type=int, default=3)
+    parser.add_argument(
+        "--force-calibration-frames",
+        type=int,
+        default=FORCE_CALIBRATION_FRAMES,
+        help="Initial stationary samples for right-wrist force baseline; 0 disables calibration.",
+    )
     parser.add_argument("--strict-sensors", action="store_true")
     args = parser.parse_args()
     MockClient(
@@ -427,6 +482,7 @@ def main():
         args.chunk_blend_steps,
         args.inference_delay_steps,
         args.strict_sensors,
+        args.force_calibration_frames,
     ).run()
 
 

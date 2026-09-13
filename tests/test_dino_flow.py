@@ -3,6 +3,7 @@ import torch
 from torch import nn
 
 from deployment.client_mock import ACTION_HORIZON, CONTROL_DT, MockClient
+from lerobot.configs import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.datasets.sampler import FixedEpisodeSampler
 from lerobot.policies.dino_flow.configuration_dino_flow import DinoFlowConfig
 from lerobot.policies.dino_flow.modeling_dino_flow import (
@@ -11,6 +12,7 @@ from lerobot.policies.dino_flow.modeling_dino_flow import (
     DinoFlowPolicy,
     DinoVisionEncoder,
 )
+from lerobot.processor.normalize_processor import NormalizerProcessorStep
 
 
 def _small_config() -> DinoFlowConfig:
@@ -48,6 +50,29 @@ def test_default_camera_targets_preserve_wrist_width():
     assert config.image_resize_shapes["observation.images.base_0_rgb"] == (480, 768)
     assert config.image_resize_shapes["observation.images.left_wrist_0_rgb"] == (480, 832)
     assert config.image_resize_shapes["observation.images.right_wrist_0_rgb"] == (480, 832)
+
+
+def test_min_max_constant_channel_does_not_amplify_deployment_noise():
+    step = NormalizerProcessorStep(
+        features={"observation.state": PolicyFeature(FeatureType.STATE, (3,))},
+        norm_map={FeatureType.STATE: NormalizationMode.MIN_MAX},
+        stats={"observation.state": {"min": [0.0, 0.0, -2.0], "max": [0.0, 100.0, 2.0]}},
+    )
+
+    raw = {"observation.state": torch.tensor([[7.0, 0.0, 50.0]])}
+    normalized = step._normalize_observation(raw, inverse=False)["observation.state"]
+
+    # The first channel was always zero during training. A non-zero deployment
+    # reading must stay at its training representation instead of becoming 1/e-8.
+    # The second channel is sparse: its zero is still a valid -1 value, while
+    # a real non-zero value continues to use its learned range.
+    torch.testing.assert_close(normalized, torch.tensor([[-1.0, -1.0, 0.0]]))
+    assert torch.isfinite(normalized).all()
+
+    restored = step._normalize_observation(
+        {"observation.state": normalized}, inverse=True
+    )["observation.state"]
+    torch.testing.assert_close(restored, torch.tensor([[0.0, 0.0, 0.0]]))
 
 
 def test_contact_history_layout_and_output():

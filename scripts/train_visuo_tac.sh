@@ -10,8 +10,8 @@ exec bash "$DINOFLOW_ROOT/scripts/train_phase1.sh" \
   --batch-size "${DINOFLOW_BATCH_SIZE:-32}" \
   --num-workers "${DINOFLOW_NUM_WORKERS:-12}" \
   --prefetch-factor "${DINOFLOW_PREFETCH_FACTOR:-2}" \
-  --log-freq "${DINOFLOW_LOG_FREQ:-50}" \
-  --val-freq "${DINOFLOW_VAL_FREQ:-2500}" \
+  --log-freq "${DINOFLOW_LOG_FREQ:-10}" \
+  --val-freq "${DINOFLOW_VAL_FREQ:-1000}" \
   --val-batch-size "${DINOFLOW_VAL_BATCH_SIZE:-8}" \
   --val-num-frames "${DINOFLOW_VAL_NUM_FRAMES:-128}" \
   --save-freq "${DINOFLOW_SAVE_FREQ:-5000}" \

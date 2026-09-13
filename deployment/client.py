@@ -29,6 +29,7 @@ if ROBOT_ROOT:
 # Reuse the minimal protocol and observation implementation from mock. The
 # actual client only changes the action execution step.
 from client_mock import (
+    FORCE_CALIBRATION_FRAMES,
     MockClient,
     recv_response,
     send_frame,
@@ -168,6 +169,12 @@ def main():
     parser.add_argument("--rtc-execution-horizon", type=int, default=20)
     parser.add_argument("--chunk-blend-steps", type=int, default=0)
     parser.add_argument("--inference-delay-steps", type=int, default=3)
+    parser.add_argument(
+        "--force-calibration-frames",
+        type=int,
+        default=FORCE_CALIBRATION_FRAMES,
+        help="Initial stationary samples for right-wrist force baseline; 0 disables calibration.",
+    )
     args = parser.parse_args()
     RobotClient(
         args.host,
@@ -180,6 +187,7 @@ def main():
         rtc_execution_horizon=args.rtc_execution_horizon,
         chunk_blend_steps=args.chunk_blend_steps,
         inference_delay_steps=args.inference_delay_steps,
+        force_calibration_frames=args.force_calibration_frames,
     ).run()
 
 

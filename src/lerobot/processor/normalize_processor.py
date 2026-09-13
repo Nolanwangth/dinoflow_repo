@@ -371,17 +371,20 @@ class _NormalizationMixin:
 
             min_val, max_val = stats["min"], stats["max"]
             denom = max_val - min_val
-            # When min_val and max_val are nearly identical, substitute the denominator
-            # with a small epsilon to prevent division by zero or exploding values.
-            # This consistently maps an input equal to min_val to -1.
-            denom = torch.where(
-                denom < self.eps, torch.tensor(self.eps, device=tensor.device, dtype=tensor.dtype), denom
-            )
+            # A feature that was constant in the training set has no learned
+            # scale.  Mapping a deployment value with ``eps`` would turn even
+            # sensor noise into a huge out-of-distribution input.  Keep these
+            # channels at the training representation instead.  For MIN_MAX,
+            # the training value (min == max) is represented by -1.
+            degenerate = denom.abs() < self.eps
+            safe_denom = torch.where(degenerate, torch.ones_like(denom), denom)
             if inverse:
                 # Map from [-1, 1] back to [min, max]
-                return (tensor + 1) / 2 * denom + min_val
+                normalized = (tensor + 1) / 2 * safe_denom + min_val
+                return torch.where(degenerate, min_val, normalized)
             # Map from [min, max] to [-1, 1]
-            return 2 * (tensor - min_val) / denom - 1
+            normalized = 2 * (tensor - min_val) / safe_denom - 1
+            return torch.where(degenerate, torch.full_like(normalized, -1.0), normalized)
 
         if norm_mode == NormalizationMode.QUANTILES:
             q01 = stats.get("q01", None)
@@ -392,14 +395,16 @@ class _NormalizationMixin:
                 )
 
             denom = q99 - q01
-            # Clamp near-zero denominators to epsilon to prevent exploding
-            # normalized values when quantile range is very narrow.
-            denom = torch.where(
-                denom < self.eps, torch.tensor(self.eps, device=tensor.device, dtype=tensor.dtype), denom
-            )
+            # A zero quantile range has the same problem as a zero min/max
+            # range.  Keep it finite and deterministic instead of amplifying
+            # deployment noise by 1 / eps.
+            degenerate = denom.abs() < self.eps
+            safe_denom = torch.where(degenerate, torch.ones_like(denom), denom)
             if inverse:
-                return (tensor + 1.0) * denom / 2.0 + q01
-            return 2.0 * (tensor - q01) / denom - 1.0
+                normalized = (tensor + 1.0) * safe_denom / 2.0 + q01
+                return torch.where(degenerate, q01, normalized)
+            normalized = 2.0 * (tensor - q01) / safe_denom - 1.0
+            return torch.where(degenerate, torch.full_like(normalized, -1.0), normalized)
 
         if norm_mode == NormalizationMode.QUANTILE10:
             q10 = stats.get("q10", None)
@@ -410,14 +415,13 @@ class _NormalizationMixin:
                 )
 
             denom = q90 - q10
-            # Clamp near-zero denominators to epsilon to prevent exploding
-            # normalized values when quantile range is very narrow.
-            denom = torch.where(
-                denom < self.eps, torch.tensor(self.eps, device=tensor.device, dtype=tensor.dtype), denom
-            )
+            degenerate = denom.abs() < self.eps
+            safe_denom = torch.where(degenerate, torch.ones_like(denom), denom)
             if inverse:
-                return (tensor + 1.0) * denom / 2.0 + q10
-            return 2.0 * (tensor - q10) / denom - 1.0
+                normalized = (tensor + 1.0) * safe_denom / 2.0 + q10
+                return torch.where(degenerate, q10, normalized)
+            normalized = 2.0 * (tensor - q10) / safe_denom - 1.0
+            return torch.where(degenerate, torch.full_like(normalized, -1.0), normalized)
 
         # If necessary stats are missing, return input unchanged.
         return tensor

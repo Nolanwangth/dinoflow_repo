@@ -14,10 +14,10 @@ DINOFLOW_STEPS="${DINOFLOW_STEPS:-30000}"
 DINOFLOW_BATCH_SIZE="${DINOFLOW_BATCH_SIZE:-32}"
 DINOFLOW_NUM_WORKERS="${DINOFLOW_NUM_WORKERS:-12}"
 DINOFLOW_PREFETCH_FACTOR="${DINOFLOW_PREFETCH_FACTOR:-2}"
-DINOFLOW_LOG_FREQ="${DINOFLOW_LOG_FREQ:-50}"
-DINOFLOW_VAL_FREQ="${DINOFLOW_VAL_FREQ:-2500}"
+DINOFLOW_LOG_FREQ="${DINOFLOW_LOG_FREQ:-10}"
+DINOFLOW_VAL_FREQ="${DINOFLOW_VAL_FREQ:-1000}"
 DINOFLOW_VAL_BATCH_SIZE="${DINOFLOW_VAL_BATCH_SIZE:-8}"
-DINOFLOW_VAL_NUM_FRAMES="${DINOFLOW_VAL_NUM_FRAMES:-16}"
+DINOFLOW_VAL_NUM_FRAMES="${DINOFLOW_VAL_NUM_FRAMES:-128}"
 DINOFLOW_SAVE_FREQ="${DINOFLOW_SAVE_FREQ:-5000}"
 DINOFLOW_HIDDEN_DIM="${DINOFLOW_HIDDEN_DIM:-256}"
 DINOFLOW_NUM_LAYERS="${DINOFLOW_NUM_LAYERS:-6}"
@@ -57,7 +57,7 @@ usage() {
   --batch-size N                  batch size，默认 32
   --num-workers N                 DataLoader worker 数，默认 12
   --prefetch-factor N             每个 worker 预取数量，默认 2
-  --log-freq N                    日志频率，默认 50
+  --log-freq N                    日志频率，默认 10
   --hidden-dim N                  action DiT 隐藏维度，默认 256
   --num-layers N                  action DiT 层数，默认 6
   --num-heads N                   attention heads，默认 8
@@ -72,9 +72,9 @@ usage() {
   --optimizer-lr LR               学习率，默认 1e-4
   --scheduler-decay-lr LR         cosine 最低学习率，默认 1e-5
   --save-freq N                   checkpoint 保存频率，默认 5000
-  --val-freq N                    validation 频率，默认 2500；0 表示关闭
+  --val-freq N                    validation 频率，默认 1000；0 表示关闭
   --val-batch-size N              validation batch size，默认 8
-  --val-num-frames N              每次 validation 采样帧数，默认 16
+  --val-num-frames N              每次 validation 采样帧数，默认 128
   --seed N                        随机种子，默认 1000
 
 开关:

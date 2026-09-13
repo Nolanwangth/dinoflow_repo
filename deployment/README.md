@@ -28,3 +28,10 @@ initial inference delay is configured as 3 ticks; adjust
 `--inference-delay-steps` after checking the server's measured latency. The
 robot client enables strict sensor validation automatically. The mock can use
 the same checks with `--strict-sensors`.
+
+At startup both clients keep the robot still and collect 30 force samples at
+30 Hz. They subtract the median of the right-wrist six-axis force
+(`hand_force[6:12]`, state indices `[36:42]`) from subsequent observations.
+This matches the per-episode baseline correction used by the training dataset.
+Use `--force-calibration-frames 0` only when the incoming force data has
+already been corrected upstream.
