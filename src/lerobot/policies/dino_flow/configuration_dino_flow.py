@@ -31,6 +31,13 @@ class DinoFlowConfig(PreTrainedConfig):
     tactile_history_steps: int = 6
     tactile_active_threshold: float = -0.95
 
+    # Keep the existing global contact summary and optionally expose the same
+    # history as identity- and time-aware tokens to the last DiT blocks.
+    use_contact_tokens: bool = True
+    contact_token_dim: int = 128
+    contact_token_heads: int = 4
+    contact_attention_layers: int = 2
+
     vision_encoder_name: str = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
     vision_encoder_dim: int = 384
     vision_patch_size: int = 16
@@ -115,6 +122,14 @@ class DinoFlowConfig(PreTrainedConfig):
             )
         if self.wrist_force_dim <= 0 or self.tactile_dim <= 0 or self.tactile_history_steps <= 0:
             raise ValueError("wrist_force_dim, tactile_dim, and tactile_history_steps must be positive")
+        if self.wrist_force_dim % 2 != 0:
+            raise ValueError("wrist_force_dim must be even so left and right wrist force can be split")
+        if self.contact_token_dim <= 0 or self.contact_token_heads <= 0:
+            raise ValueError("contact_token_dim and contact_token_heads must be positive")
+        if self.contact_token_dim % self.contact_token_heads != 0:
+            raise ValueError("contact_token_dim must be divisible by contact_token_heads")
+        if self.contact_attention_layers < 0:
+            raise ValueError("contact_attention_layers must be non-negative")
         if self.horizon <= 0:
             raise ValueError("horizon must be positive")
         if self.n_action_steps <= 0 or self.n_action_steps > self.horizon:

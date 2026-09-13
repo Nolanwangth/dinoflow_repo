@@ -56,8 +56,11 @@ def test_contact_history_layout_and_output():
     encoder = ContactHistoryEncoder(config)
     state_history = torch.randn(2, config.tactile_history_steps, config.observation_state_dim)
     output = encoder(state_history)
+    tokens = encoder.forward_tokens(state_history)
     assert output.shape == (2, 128)
+    assert tokens.shape == (2, config.tactile_history_steps * 14, config.contact_token_dim)
     assert torch.isfinite(output).all()
+    assert torch.isfinite(tokens).all()
 
 
 def test_contact_history_is_causal_and_trainable():
@@ -103,11 +106,59 @@ def test_action_dit_forward_shape():
     visual_tokens = torch.randn(2, 5, config.hidden_dim)
     visual_valid_mask = torch.tensor([[True, True, True, False, False]]).expand(2, -1)
     timestep = torch.rand(2)
+    contact_tokens = torch.randn(
+        2, config.tactile_history_steps * 14, config.contact_token_dim
+    )
 
-    output = model(noisy_action, state, visual_tokens, visual_valid_mask, timestep)
+    output = model(
+        noisy_action,
+        state,
+        visual_tokens,
+        visual_valid_mask,
+        timestep,
+        contact_tokens=contact_tokens,
+    )
 
     assert output.shape == (2, config.horizon, config.action_dim)
     assert torch.isfinite(output).all()
+
+
+def test_contact_attention_is_zero_initialized():
+    config = _small_config()
+    model = ActionDiT(config).eval()
+    assert model.blocks[-1].contact_cross_attn is not None
+    noisy_action = torch.randn(2, config.horizon, config.action_dim)
+    state = torch.randn(2, config.state_dim)
+    visual_tokens = torch.randn(2, 5, config.hidden_dim)
+    visual_valid_mask = torch.ones(2, 5, dtype=torch.bool)
+    timestep = torch.rand(2)
+    contact_tokens = torch.randn(
+        2, config.tactile_history_steps * 14, config.contact_token_dim
+    )
+
+    without_tokens = model(noisy_action, state, visual_tokens, visual_valid_mask, timestep)
+    with_tokens = model(
+        noisy_action,
+        state,
+        visual_tokens,
+        visual_valid_mask,
+        timestep,
+        contact_tokens=contact_tokens,
+    )
+
+    torch.testing.assert_close(with_tokens, without_tokens)
+
+    with torch.no_grad():
+        model.blocks[-1].contact_out.weight.fill_(0.01)
+    after_learning = model(
+        noisy_action,
+        state,
+        visual_tokens,
+        visual_valid_mask,
+        timestep,
+        contact_tokens=contact_tokens,
+    )
+    assert not torch.equal(after_learning, without_tokens)
 
 
 def test_camera_embedding_is_enabled_by_config():

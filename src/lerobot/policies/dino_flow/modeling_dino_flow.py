@@ -219,8 +219,8 @@ class TactileRegionEncoder(nn.Module):
         self.active_threshold = config.tactile_active_threshold
         self.history_steps = config.tactile_history_steps
 
-    def forward(self, tactile: Tensor) -> Tensor:
-        """Encode ``[B, history, 604]`` without per-frame standardization."""
+    def forward_regions(self, tactile: Tensor) -> Tensor:
+        """Encode ``[B, history, 604]`` as ``[B, history, 12, 35]``."""
         if tactile.ndim != 3:
             raise ValueError(f"Expected tactile history [B,T,D], got {tuple(tactile.shape)}")
         batch, history, width = tactile.shape
@@ -249,10 +249,12 @@ class TactileRegionEncoder(nn.Module):
             features.append(torch.cat([encoded, stats], dim=-1))
             offset += size
 
-        frame_features = torch.cat(features, dim=-1)
-        if frame_features.shape[-1] != 12 * (32 + 3):
-            raise RuntimeError(f"Unexpected tactile feature width: {frame_features.shape[-1]}")
-        return frame_features
+        return torch.stack(features, dim=2)
+
+    def forward(self, tactile: Tensor) -> Tensor:
+        """Encode ``[B, history, 604]`` without per-frame standardization."""
+        region_features = self.forward_regions(tactile)
+        return region_features.flatten(2)
 
 
 class ContactHistoryEncoder(nn.Module):
@@ -268,30 +270,102 @@ class ContactHistoryEncoder(nn.Module):
             nn.SiLU(),
             nn.Linear(256, 128),
         )
+        token_dim = config.contact_token_dim
+        wrist_dim = config.wrist_force_dim // 2
+        self.left_force_token_in = nn.Sequential(
+            nn.Linear(wrist_dim, 32), nn.SiLU(), nn.Linear(32, token_dim)
+        )
+        self.right_force_token_in = nn.Sequential(
+            nn.Linear(wrist_dim, 32), nn.SiLU(), nn.Linear(32, token_dim)
+        )
+        self.tactile_token_in = nn.Sequential(
+            nn.Linear(32 + 3, token_dim), nn.SiLU(), nn.Linear(token_dim, token_dim)
+        )
+        # Token order is twelve tactile regions, left wrist, right wrist for
+        # each frame. Learned identities make that order explicit to attention.
+        self.contact_identity = nn.Parameter(torch.randn(14, token_dim) * 0.02)
+        self.contact_time = nn.Parameter(torch.randn(config.tactile_history_steps, token_dim) * 0.02)
+        self.contact_token_norm = nn.LayerNorm(token_dim)
         self.force_offset = config.tactile_state_offset - config.wrist_force_dim
         self.tactile_offset = config.tactile_state_offset
         self.force_end = config.tactile_state_offset
         self.tactile_dim = config.tactile_dim
         self.history_steps = config.tactile_history_steps
 
-    def forward(self, state_history: Tensor) -> Tensor:
+    def _encoded_components(self, state_history: Tensor) -> tuple[Tensor, Tensor]:
         if state_history.ndim != 3:
             raise ValueError(f"Expected state history [B,T,D], got {tuple(state_history.shape)}")
+        if state_history.shape[1] != self.history_steps:
+            raise ValueError(
+                f"Expected {self.history_steps} contact history frames, got {state_history.shape[1]}"
+            )
         force = state_history[..., self.force_offset : self.force_end]
         tactile = state_history[..., self.tactile_offset : self.tactile_offset + self.tactile_dim]
+        tactile_features = self.tactile_in.forward_regions(tactile)
+        return force, tactile_features
+
+    def _tokens_from_components(self, force: Tensor, tactile_features: Tensor) -> Tensor:
+        batch, history = force.shape[:2]
+        tactile_tokens = self.tactile_token_in(tactile_features)
+        wrist_dim = force.shape[-1] // 2
+        left_token = self.left_force_token_in(force[..., :wrist_dim]).unsqueeze(2)
+        right_token = self.right_force_token_in(force[..., wrist_dim:]).unsqueeze(2)
+        frame_tokens = torch.cat([tactile_tokens, left_token, right_token], dim=2)
+        frame_tokens = frame_tokens + self.contact_identity[None, None]
+        frame_tokens = frame_tokens + self.contact_time[None, :, None]
+        return self.contact_token_norm(frame_tokens.reshape(batch, history * 14, -1))
+
+    def forward(self, state_history: Tensor) -> Tensor:
+        force, tactile_features = self._encoded_components(state_history)
         force_features = self.force_in(force)
-        tactile_features = self.tactile_in(tactile)
-        frame_features = torch.cat([force_features, tactile_features], dim=-1)
+        frame_features = torch.cat([force_features, tactile_features.flatten(2)], dim=-1)
         return self.history_in(frame_features.reshape(state_history.shape[0], -1))
+
+    def forward_tokens(self, state_history: Tensor) -> Tensor:
+        """Return contact history as identity- and time-aware queryable tokens."""
+        force, tactile_features = self._encoded_components(state_history)
+        return self._tokens_from_components(force, tactile_features)
+
+    def forward_with_tokens(self, state_history: Tensor) -> tuple[Tensor, Tensor]:
+        """Compute the global summary and local tokens with one tactile CNN pass."""
+        force, tactile_features = self._encoded_components(state_history)
+        force_features = self.force_in(force)
+        frame_features = torch.cat([force_features, tactile_features.flatten(2)], dim=-1)
+        global_features = self.history_in(frame_features.reshape(state_history.shape[0], -1))
+        return global_features, self._tokens_from_components(force, tactile_features)
 
 
 class ActionDiTBlock(nn.Module):
-    def __init__(self, dim: int, heads: int, dropout: float):
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        dropout: float,
+        contact_token_dim: int = 128,
+        contact_token_heads: int = 4,
+        use_contact_attention: bool = False,
+    ):
         super().__init__()
         self.norm_self = nn.LayerNorm(dim)
         self.self_attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
         self.norm_cross = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+        self.contact_cross_attn = None
+        if use_contact_attention:
+            self.norm_contact = nn.LayerNorm(dim)
+            self.contact_query = nn.Linear(dim, contact_token_dim)
+            self.contact_kv_norm = nn.LayerNorm(contact_token_dim)
+            self.contact_cross_attn = nn.MultiheadAttention(
+                contact_token_dim,
+                contact_token_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.contact_out = nn.Linear(contact_token_dim, dim)
+            # Preserve the old network's output at initialization. The new
+            # branch learns its residual after contact_out starts moving.
+            nn.init.zeros_(self.contact_out.weight)
+            nn.init.zeros_(self.contact_out.bias)
         self.norm_ffn = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * 4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 4, dim)
@@ -301,7 +375,12 @@ class ActionDiTBlock(nn.Module):
         nn.init.zeros_(self.ada[-1].bias)
 
     def forward(
-        self, x: Tensor, condition: Tensor, condition_key_padding_mask: Tensor | None, time_emb: Tensor
+        self,
+        x: Tensor,
+        condition: Tensor,
+        condition_key_padding_mask: Tensor | None,
+        time_emb: Tensor,
+        contact_tokens: Tensor | None = None,
     ) -> Tensor:
         shift_s, scale_s, gate_s, shift_c, scale_c, gate_c = self.ada(time_emb).chunk(6, dim=-1)
         h = self.norm_self(x) * (1 + scale_s[:, None]) + shift_s[:, None]
@@ -316,6 +395,13 @@ class ActionDiTBlock(nn.Module):
             need_weights=False,
         )
         x = x + gate_c[:, None] * cross
+        if self.contact_cross_attn is not None and contact_tokens is not None:
+            contact_query = self.contact_query(self.norm_contact(x))
+            contact_kv = self.contact_kv_norm(contact_tokens)
+            contact_update, _ = self.contact_cross_attn(
+                contact_query, contact_kv, contact_kv, need_weights=False
+            )
+            x = x + self.contact_out(contact_update)
         x = x + self.ffn(self.norm_ffn(x))
         return x
 
@@ -344,8 +430,18 @@ class ActionDiT(nn.Module):
         self.action_pos = nn.Parameter(torch.randn(1, config.horizon, config.hidden_dim) * 0.02)
         self.blocks = nn.ModuleList(
             [
-                ActionDiTBlock(config.hidden_dim, config.num_heads, config.dropout)
-                for _ in range(config.num_layers)
+                ActionDiTBlock(
+                    config.hidden_dim,
+                    config.num_heads,
+                    config.dropout,
+                    contact_token_dim=config.contact_token_dim,
+                    contact_token_heads=config.contact_token_heads,
+                    use_contact_attention=(
+                        config.use_contact_tokens
+                        and block_idx >= max(0, config.num_layers - config.contact_attention_layers)
+                    ),
+                )
+                for block_idx in range(config.num_layers)
             ]
         )
         self.norm = nn.LayerNorm(config.hidden_dim)
@@ -359,6 +455,7 @@ class ActionDiT(nn.Module):
         visual_valid_mask: Tensor,
         t: Tensor,
         contact_features: Tensor | None = None,
+        contact_tokens: Tensor | None = None,
     ) -> Tensor:
         state_expanded = state[:, None, :].expand(-1, noisy_action.shape[1], -1)
         action_input = torch.cat([noisy_action, state_expanded], dim=-1)
@@ -375,7 +472,13 @@ class ActionDiT(nn.Module):
         if contact_features is not None:
             time_emb = time_emb + self.contact_in(contact_features)
         for block in self.blocks:
-            action_tokens = block(action_tokens, condition, condition_key_padding_mask, time_emb)
+            action_tokens = block(
+                action_tokens,
+                condition,
+                condition_key_padding_mask,
+                time_emb,
+                contact_tokens=contact_tokens,
+            )
         return self.action_out(self.norm(action_tokens))
 
 
@@ -453,22 +556,41 @@ class DinoFlowPolicy(PreTrainedPolicy):
             valid_masks.append(valid_mask)
         return torch.cat(projected_tokens, dim=1), torch.cat(valid_masks, dim=1)
 
-    def _contact_features(self, batch: dict[str, Tensor]) -> Tensor:
+    def _contact_conditions(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor | None]:
         state_history = self._state_history(batch)
         required = self.config.tactile_state_offset + self.config.tactile_dim
         if state_history.shape[-1] < required:
             # Keep small synthetic/unit-test configurations usable; real
             # DinoFlow training fails loudly at dataset validation instead.
-            return torch.zeros(
+            global_features = torch.zeros(
                 (state_history.shape[0], 128), device=state_history.device, dtype=state_history.dtype
             )
-        return self.contact_encoder(state_history)
+            contact_tokens = None
+            if self.config.use_contact_tokens:
+                contact_tokens = torch.zeros(
+                    (
+                        state_history.shape[0],
+                        self.config.tactile_history_steps * 14,
+                        self.config.contact_token_dim,
+                    ),
+                    device=state_history.device,
+                    dtype=state_history.dtype,
+                )
+            return global_features, contact_tokens
+        if self.config.use_contact_tokens:
+            global_features, contact_tokens = self.contact_encoder.forward_with_tokens(state_history)
+        else:
+            global_features = self.contact_encoder(state_history)
+            contact_tokens = None
+        return global_features, contact_tokens
 
-    def _condition(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def _condition(
+        self, batch: dict[str, Tensor]
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
         state = self._current_state(batch)
         visual_tokens, visual_valid_mask = self._current_images(batch)
-        contact_features = self._contact_features(batch)
-        return state, visual_tokens, visual_valid_mask, contact_features
+        contact_features, contact_tokens = self._contact_conditions(batch)
+        return state, visual_tokens, visual_valid_mask, contact_features, contact_tokens
 
     def _predict_velocity(
         self,
@@ -478,8 +600,17 @@ class DinoFlowPolicy(PreTrainedPolicy):
         visual_tokens: Tensor,
         visual_valid_mask: Tensor,
         contact_features: Tensor,
+        contact_tokens: Tensor | None,
     ) -> Tensor:
-        return self.action_model(x, state, visual_tokens, visual_valid_mask, t, contact_features)
+        return self.action_model(
+            x,
+            state,
+            visual_tokens,
+            visual_valid_mask,
+            t,
+            contact_features,
+            contact_tokens,
+        )
 
     def _flow_loss(
         self,
@@ -488,6 +619,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         visual_tokens: Tensor,
         visual_valid_mask: Tensor,
         contact_features: Tensor,
+        contact_tokens: Tensor | None,
         generator: torch.Generator | None = None,
     ) -> Tensor:
         target = batch[ACTION][..., : self.config.action_dim]
@@ -515,7 +647,15 @@ class DinoFlowPolicy(PreTrainedPolicy):
         t_view = t[:, None, None]
         x_t = (1 - t_view) * noise + t_view * target
         target_velocity = target - noise
-        pred = self._predict_velocity(x_t, t, state, visual_tokens, visual_valid_mask, contact_features)
+        pred = self._predict_velocity(
+            x_t,
+            t,
+            state,
+            visual_tokens,
+            visual_valid_mask,
+            contact_features,
+            contact_tokens,
+        )
         loss = F.mse_loss(pred, target_velocity, reduction="none")
         if self.config.do_mask_loss_for_padding and "action_is_pad" in batch:
             action_is_pad = batch["action_is_pad"]
@@ -607,7 +747,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         inference_delay: int = 0,
         execution_horizon: int = 20,
     ) -> Tensor:
-        state, visual_tokens, visual_valid_mask, contact_features = self._condition(batch)
+        state, visual_tokens, visual_valid_mask, contact_features, contact_tokens = self._condition(batch)
         dtype = next(self.action_model.parameters()).dtype
         noise_shape = (state.shape[0], self.config.horizon, self.config.action_dim)
         noise_key = (noise_shape, str(state.device), dtype)
@@ -632,7 +772,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         for i in range(steps):
             t = torch.full((state.shape[0],), i / steps, device=state.device, dtype=dtype)
             velocity = self._predict_velocity(
-                x, t, state, visual_tokens, visual_valid_mask, contact_features
+                x, t, state, visual_tokens, visual_valid_mask, contact_features, contact_tokens
             )
             velocity = self._rtc_velocity(
                 x, velocity, t, prev_chunk_left_over, inference_delay, execution_horizon
@@ -641,7 +781,13 @@ class DinoFlowPolicy(PreTrainedPolicy):
                 x_euler = x + dt * velocity
                 t_next = torch.full((state.shape[0],), (i + 1) / steps, device=state.device, dtype=dtype)
                 velocity_next = self._predict_velocity(
-                    x_euler, t_next, state, visual_tokens, visual_valid_mask, contact_features
+                    x_euler,
+                    t_next,
+                    state,
+                    visual_tokens,
+                    visual_valid_mask,
+                    contact_features,
+                    contact_tokens,
                 )
                 velocity_next = self._rtc_velocity(
                     x_euler, velocity_next, t_next, prev_chunk_left_over,
@@ -688,7 +834,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         batch: dict[str, Tensor],
         deterministic: bool = False,
     ) -> tuple[Tensor, dict | None]:
-        state, visual_tokens, visual_valid_mask, contact_features = self._condition(batch)
+        state, visual_tokens, visual_valid_mask, contact_features, contact_tokens = self._condition(batch)
         generator = None
         if deterministic:
             generator = torch.Generator(device=state.device)
@@ -700,6 +846,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
                 visual_tokens,
                 visual_valid_mask,
                 contact_features,
+                contact_tokens,
                 generator=generator,
             ),
             None,
