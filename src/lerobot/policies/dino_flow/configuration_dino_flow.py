@@ -31,7 +31,9 @@ class DinoFlowConfig(PreTrainedConfig):
     vision_lora_alpha: int = 16
     vision_lora_dropout: float = 0.0
     vision_lora_lr: float = 2e-5
-    vision_gradient_checkpointing: bool = True
+    # Disabled by default for faster LoRA training when GPU memory allows it.
+    # Enable explicitly to reduce activation memory.
+    vision_gradient_checkpointing: bool = False
     # Shared policy latent width after projecting DINO's native 384-d features.
     # The physical robot action remains ``action_dim`` (26 joints); 256 is the
     # internal visual/action-token width, not the command dimensionality.

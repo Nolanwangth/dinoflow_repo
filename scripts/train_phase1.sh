@@ -12,7 +12,10 @@ DINOFLOW_JOB_NAME="${DINOFLOW_JOB_NAME:-$(basename "$DINOFLOW_OUTPUT_DIR")}"
 DINOFLOW_DATASET_REPO_ID="${DINOFLOW_DATASET_REPO_ID:-local/splice_wires_phase1_train}"
 DINOFLOW_VAL_DATASET_REPO_ID="${DINOFLOW_VAL_DATASET_REPO_ID:-local/splice_wires_phase1_validation}"
 DINOFLOW_STEPS="${DINOFLOW_STEPS:-30000}"
-DINOFLOW_BATCH_SIZE="${DINOFLOW_BATCH_SIZE:-32}"
+# Without DINO activation checkpointing, batch 32 exceeds the 32 GB card for
+# the three-camera 4560-token input. Keep the speed configuration runnable;
+# use --batch-size 32 only together with checkpointing or a larger GPU.
+DINOFLOW_BATCH_SIZE="${DINOFLOW_BATCH_SIZE:-16}"
 DINOFLOW_NUM_WORKERS="${DINOFLOW_NUM_WORKERS:-12}"
 DINOFLOW_PREFETCH_FACTOR="${DINOFLOW_PREFETCH_FACTOR:-2}"
 DINOFLOW_LOG_FREQ="${DINOFLOW_LOG_FREQ:-10}"
@@ -31,7 +34,7 @@ DINOFLOW_VISION_LORA_RANK="${DINOFLOW_VISION_LORA_RANK:-8}"
 DINOFLOW_VISION_LORA_ALPHA="${DINOFLOW_VISION_LORA_ALPHA:-16}"
 DINOFLOW_VISION_LORA_DROPOUT="${DINOFLOW_VISION_LORA_DROPOUT:-0.0}"
 DINOFLOW_VISION_LORA_LR="${DINOFLOW_VISION_LORA_LR:-2e-5}"
-DINOFLOW_VISION_GRADIENT_CHECKPOINTING="${DINOFLOW_VISION_GRADIENT_CHECKPOINTING:-true}"
+DINOFLOW_VISION_GRADIENT_CHECKPOINTING="${DINOFLOW_VISION_GRADIENT_CHECKPOINTING:-false}"
 DINOFLOW_USE_CAMERA_EMBEDDING="${DINOFLOW_USE_CAMERA_EMBEDDING:-true}"
 DINOFLOW_OPTIMIZER_LR="${DINOFLOW_OPTIMIZER_LR:-1e-4}"
 DINOFLOW_SCHEDULER_DECAY_LR="${DINOFLOW_SCHEDULER_DECAY_LR:-1e-5}"
@@ -55,7 +58,7 @@ usage() {
 
 训练:
   --steps N                       训练步数，默认 30000
-  --batch-size N                  batch size，默认 32
+  --batch-size N                  batch size，默认 16（关闭 checkpointing 的可运行配置）
   --num-workers N                 DataLoader worker 数，默认 12
   --prefetch-factor N             每个 worker 预取数量，默认 2
   --log-freq N                    日志频率，默认 10
@@ -69,7 +72,7 @@ usage() {
   --vision-lora-alpha N            DINO LoRA alpha，默认 16
   --vision-lora-lr LR               DINO LoRA 学习率，默认 2e-5
   --vision-gradient-checkpointing / --no-vision-gradient-checkpointing
-                                  LoRA 训练时对 DINO 重算激活，默认开启
+                                  LoRA 训练时对 DINO 重算激活，默认关闭
   --camera-embedding / --no-camera-embedding
                                   为每路视觉 token 加相机身份，默认开启
   --optimizer-lr LR               学习率，默认 1e-4

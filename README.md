@@ -6,8 +6,9 @@
 
 - 冻结 DINOv3 ViT-S/16+，输入三路相机图像。
 - base 图像保持 `480×768`，两路 wrist 图像等比例缩放到高度 `480` 后中心裁到 `480×832`；当前 `480×848` wrist 输入只裁左右各 8 像素。base 为 `1440` 个 patch、每路 wrist 为 `1560` 个 patch，三路拼接为 `[B, 4560, 384]`，再通过共享 `Linear(384→256)` 交给 action DiT，并加入可学习的相机身份 embedding。
-- DINOv3 的 12 个 attention block 只对 `q_proj`/`v_proj` 加 LoRA（`r=8`、`alpha=16`、LoRA lr=`2e-5`），原始 DINO 权重全部冻结；DINO gradient checkpointing 只用于降低 LoRA 训练显存。关闭 `vision_lora_enabled` 可使用冻结 DINO。
+- DINOv3 的 12 个 attention block 只对 `q_proj`/`v_proj` 加 LoRA（`r=8`、`alpha=16`、LoRA lr=`2e-5`），原始 DINO 权重全部冻结；默认关闭 DINO gradient checkpointing 以减少重算、提高训练速度，需要节省显存时可显式开启。关闭 `vision_lora_enabled` 可使用冻结 DINO。
 - 一次预测 50 步、26 维机器人绝对动作；256 是视觉和 Action DiT 的内部 latent 宽度，不是机器人命令维度。该基线不输入触觉、六维力或 contact token。
+- 默认训练 batch 为 `16`，因为三路完整 patch token 在 32 GB GPU 上关闭 DINO checkpointing 时无法容纳 batch `32`；显存足够时可显式增大 batch。
 - flow matching 使用 MSE velocity loss，推理支持 Euler/Heun 积分和可选 RTC chunk 对齐。
 - 训练基于 LeRobot v3 数据集格式，支持 train/validation 两个本地数据集。
 

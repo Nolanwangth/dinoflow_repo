@@ -33,6 +33,7 @@ def test_default_camera_targets_preserve_wrist_width():
     assert config.hidden_dim == 256
     assert config.action_dim == 26
     assert config.vision_encoder_dim == 384
+    assert config.vision_gradient_checkpointing is False
     assert config.use_camera_embedding is True
     assert config.image_resize_shapes["observation.images.base_0_rgb"] == (480, 768)
     assert config.image_resize_shapes["observation.images.left_wrist_0_rgb"] == (480, 832)

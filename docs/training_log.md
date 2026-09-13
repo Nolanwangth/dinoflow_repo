@@ -11,7 +11,7 @@
 - 视觉：三路共 `4560` 个 patch token，DINO 原生 `384` 维通过共享 `Linear(384,256)` 投影；每路加入可学习相机身份 embedding
 - 动作：物理命令为 26 维，内部 action token latent 为 `256` 维；直接学习归一化 absolute action，`use_delta_action=false`
 - Action DiT：6 层、256 hidden、8 heads；Flow Matching 为 8 步 Euler
-- DINO：Q/V LoRA 微调，rank `8`、alpha `16`、dropout `0`、lr `2e-5`；其余 DINO 权重冻结；gradient checkpointing 开启
+- DINO：Q/V LoRA 微调，rank `8`、alpha `16`、dropout `0`、lr `2e-5`；其余 DINO 权重冻结；下一次训练默认关闭 gradient checkpointing 以提速
 - 优化：Adam，Action DiT lr `1e-4`，weight decay `1e-6`，cosine scheduler 最低 lr `1e-5`，warmup `500` 步，bf16
 - 训练：batch `32`，workers `12`，目标 `30000` steps；每 `1000` steps 验证，每次采样 `128` 帧，每 `5000` steps 保存
 - W&B project：`splice_wires_dinoflow`；job name：`visuo_baseline_phase1_absolute_h256_camid_fullpatch_loraqv_r8_b32_30k_seed1000`
@@ -19,6 +19,7 @@
 - 正式训练 W&B：[kou0rfsb](https://wandb.ai/nolanwangth-karlsruhe-institute-of-technology/splice_wires_dinoflow/runs/kou0rfsb)
 - 正式输出：`outputs/visuo_baseline_phase1_absolute_h256_camid_fullpatch_loraqv_r8_b32_30k_seed1000_20260913/`
 - 启动后速度约 `1.3–1.4 step/s`，预计约 6 小时；首次 validation 在 step `1000`，首次 checkpoint 在 step `5000`
+- 提速测试：关闭 DINO checkpointing 时 batch `32` 在 32 GB GPU 上 OOM；batch `16` 的 20 step smoke test 通过，后续提速训练默认采用 `checkpointing=false, batch=16`
 
 该实验配置是当前文档中的有效 baseline。下面保留此前 512 hidden、delta action 的历史记录，便于追溯，不作为本次比较基线。
 
