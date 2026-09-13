@@ -294,6 +294,12 @@ class DinoFlowPolicy(PreTrainedPolicy):
         self.vision = DinoVisionEncoder(config)
         self.camera_keys = list(config.image_resize_shapes)
         self.visual_projection = nn.Linear(config.vision_encoder_dim, config.hidden_dim)
+        # DINO preserves spatial position inside each image, but concatenating
+        # cameras does not identify the source camera. Start from zero and
+        # learn one identity vector per camera.
+        self.camera_embeddings = nn.Parameter(
+            torch.zeros(len(self.camera_keys), config.hidden_dim)
+        )
         self.action_model = ActionDiT(config)
         # A fixed initial noise makes deployment deterministic.  The policy
         # still changes with image/state conditioning, but repeated requests
@@ -331,9 +337,16 @@ class DinoFlowPolicy(PreTrainedPolicy):
 
     def _current_images(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
         encoded = self.vision({key: batch[key] for key in self.camera_keys})
-        patch_tokens = torch.cat([encoded[key][0] for key in self.camera_keys], dim=1)
-        valid_mask = torch.cat([encoded[key][1] for key in self.camera_keys], dim=1)
-        return self.visual_projection(patch_tokens), valid_mask
+        projected_tokens = []
+        valid_masks = []
+        for camera_idx, key in enumerate(self.camera_keys):
+            tokens, valid_mask = encoded[key]
+            tokens = self.visual_projection(tokens)
+            if self.config.use_camera_embedding:
+                tokens = tokens + self.camera_embeddings[camera_idx].view(1, 1, -1)
+            projected_tokens.append(tokens)
+            valid_masks.append(valid_mask)
+        return torch.cat(projected_tokens, dim=1), torch.cat(valid_masks, dim=1)
 
     def _condition(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor]:
         state = self._current_state(batch)
@@ -378,7 +391,14 @@ class DinoFlowPolicy(PreTrainedPolicy):
         return loss.mean()
 
     @staticmethod
-    def _rtc_prefix_weights(total: int, start: int, end: int, device, dtype) -> Tensor:
+    def _rtc_prefix_weights(
+        total: int,
+        start: int,
+        end: int,
+        device,
+        dtype,
+        available_length: int | None = None,
+    ) -> Tensor:
         """Weights for the RTC-style prefix constraint.
 
         The prefix is strongest for the actions that are about to be executed,
@@ -387,6 +407,10 @@ class DinoFlowPolicy(PreTrainedPolicy):
         """
         start = max(0, min(int(start), total))
         end = max(start, min(int(end), total))
+        if available_length is not None:
+            end = min(end, max(0, int(available_length)))
+            if end <= start:
+                return torch.zeros(total, device=device, dtype=dtype)
         weights = torch.zeros(total, device=device, dtype=dtype)
         if start:
             weights[:start] = 1.0
@@ -426,7 +450,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         endpoint = x + remaining[:, None, None] * velocity
         weights = self._rtc_prefix_weights(
             x.shape[1], int(inference_delay), int(inference_delay) + int(execution_horizon),
-            x.device, x.dtype,
+            x.device, x.dtype, available_length=prev_chunk_left_over.shape[1],
         )[None, :, None]
         active = (weights > 0).to(x.dtype)
         # Convert endpoint error back to a velocity correction.  Keep the
@@ -442,7 +466,7 @@ class DinoFlowPolicy(PreTrainedPolicy):
         batch: dict[str, Tensor],
         prev_chunk_left_over: Tensor | None = None,
         inference_delay: int = 0,
-        execution_horizon: int = 10,
+        execution_horizon: int = 20,
     ) -> Tensor:
         state, visual_tokens, visual_valid_mask = self._condition(batch)
         dtype = next(self.action_model.parameters()).dtype
@@ -503,11 +527,14 @@ class DinoFlowPolicy(PreTrainedPolicy):
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
         """Generate one full action horizon in normalized action coordinates."""
+        execution_horizon = kwargs.get("execution_horizon")
+        if execution_horizon is None:
+            execution_horizon = 20
         return self._sample(
             batch,
             prev_chunk_left_over=kwargs.get("prev_chunk_left_over"),
             inference_delay=int(kwargs.get("inference_delay", 0) or 0),
-            execution_horizon=int(kwargs.get("execution_horizon", 10) or 10),
+            execution_horizon=int(execution_horizon),
         )
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict | None]:

@@ -3,10 +3,11 @@ set -euo pipefail
 
 DINOFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DINOFLOW_CONDA_ENV="${DINOFLOW_CONDA_ENV:-dinoflow_env}"
+DINOFLOW_LEROBOT_ROOT="${DINOFLOW_LEROBOT_ROOT:-$DINOFLOW_ROOT/../openpi_repo/lerobot}"
 DINOFLOW_DATASET_ROOT="${DINOFLOW_DATASET_ROOT:-$DINOFLOW_ROOT/../openpi_repo/lerobot_datasets/splice_wires_phase1_split_300_21/train}"
 DINOFLOW_VAL_DATASET_ROOT="${DINOFLOW_VAL_DATASET_ROOT:-$DINOFLOW_ROOT/../openpi_repo/lerobot_datasets/splice_wires_phase1_split_300_21/validation}"
 DINOFLOW_VISION_ENCODER="${DINOFLOW_VISION_ENCODER:-/home/nolan/models/dinov3-vits16plus}"
-DINOFLOW_OUTPUT_DIR="${DINOFLOW_OUTPUT_DIR:-$DINOFLOW_ROOT/outputs/dinoflow_phase1_$(date +%Y%m%d_%H%M%S)}"
+DINOFLOW_OUTPUT_DIR="${DINOFLOW_OUTPUT_DIR:-$DINOFLOW_ROOT/outputs/visuo_baseline_phase1_absolute_h256_camid_fullpatch_loraqv_r8_b32_30k_seed1000_$(date +%Y%m%d_%H%M%S)}"
 DINOFLOW_JOB_NAME="${DINOFLOW_JOB_NAME:-$(basename "$DINOFLOW_OUTPUT_DIR")}"
 DINOFLOW_DATASET_REPO_ID="${DINOFLOW_DATASET_REPO_ID:-local/splice_wires_phase1_train}"
 DINOFLOW_VAL_DATASET_REPO_ID="${DINOFLOW_VAL_DATASET_REPO_ID:-local/splice_wires_phase1_validation}"
@@ -14,12 +15,12 @@ DINOFLOW_STEPS="${DINOFLOW_STEPS:-30000}"
 DINOFLOW_BATCH_SIZE="${DINOFLOW_BATCH_SIZE:-32}"
 DINOFLOW_NUM_WORKERS="${DINOFLOW_NUM_WORKERS:-12}"
 DINOFLOW_PREFETCH_FACTOR="${DINOFLOW_PREFETCH_FACTOR:-2}"
-DINOFLOW_LOG_FREQ="${DINOFLOW_LOG_FREQ:-50}"
-DINOFLOW_VAL_FREQ="${DINOFLOW_VAL_FREQ:-2500}"
+DINOFLOW_LOG_FREQ="${DINOFLOW_LOG_FREQ:-10}"
+DINOFLOW_VAL_FREQ="${DINOFLOW_VAL_FREQ:-1000}"
 DINOFLOW_VAL_BATCH_SIZE="${DINOFLOW_VAL_BATCH_SIZE:-8}"
-DINOFLOW_VAL_NUM_FRAMES="${DINOFLOW_VAL_NUM_FRAMES:-16}"
+DINOFLOW_VAL_NUM_FRAMES="${DINOFLOW_VAL_NUM_FRAMES:-128}"
 DINOFLOW_SAVE_FREQ="${DINOFLOW_SAVE_FREQ:-5000}"
-DINOFLOW_HIDDEN_DIM="${DINOFLOW_HIDDEN_DIM:-512}"
+DINOFLOW_HIDDEN_DIM="${DINOFLOW_HIDDEN_DIM:-256}"
 DINOFLOW_NUM_LAYERS="${DINOFLOW_NUM_LAYERS:-6}"
 DINOFLOW_NUM_HEADS="${DINOFLOW_NUM_HEADS:-8}"
 DINOFLOW_INTEGRATION_STEPS="${DINOFLOW_INTEGRATION_STEPS:-8}"
@@ -31,12 +32,13 @@ DINOFLOW_VISION_LORA_ALPHA="${DINOFLOW_VISION_LORA_ALPHA:-16}"
 DINOFLOW_VISION_LORA_DROPOUT="${DINOFLOW_VISION_LORA_DROPOUT:-0.0}"
 DINOFLOW_VISION_LORA_LR="${DINOFLOW_VISION_LORA_LR:-2e-5}"
 DINOFLOW_VISION_GRADIENT_CHECKPOINTING="${DINOFLOW_VISION_GRADIENT_CHECKPOINTING:-true}"
+DINOFLOW_USE_CAMERA_EMBEDDING="${DINOFLOW_USE_CAMERA_EMBEDDING:-true}"
 DINOFLOW_OPTIMIZER_LR="${DINOFLOW_OPTIMIZER_LR:-1e-4}"
 DINOFLOW_SCHEDULER_DECAY_LR="${DINOFLOW_SCHEDULER_DECAY_LR:-1e-5}"
 DINOFLOW_WEIGHT_DECAY="${DINOFLOW_WEIGHT_DECAY:-1e-6}"
 DINOFLOW_WANDB_ENABLE="${DINOFLOW_WANDB_ENABLE:-false}"
 DINOFLOW_SAVE_CHECKPOINT="${DINOFLOW_SAVE_CHECKPOINT:-true}"
-DINOFLOW_USE_DELTA_ACTION="${DINOFLOW_USE_DELTA_ACTION:-true}"
+DINOFLOW_USE_DELTA_ACTION="${DINOFLOW_USE_DELTA_ACTION:-false}"
 DINOFLOW_SEED="${DINOFLOW_SEED:-1000}"
 
 usage() {
@@ -56,8 +58,8 @@ usage() {
   --batch-size N                  batch size，默认 32
   --num-workers N                 DataLoader worker 数，默认 12
   --prefetch-factor N             每个 worker 预取数量，默认 2
-  --log-freq N                    日志频率，默认 50
-  --hidden-dim N                  action DiT 隐藏维度，默认 512
+  --log-freq N                    日志频率，默认 10
+  --hidden-dim N                  action DiT 隐藏维度，默认 256
   --num-layers N                  action DiT 层数，默认 6
   --num-heads N                   attention heads，默认 8
   --num-integration-steps N       推理积分步数，默认 8
@@ -68,12 +70,14 @@ usage() {
   --vision-lora-lr LR               DINO LoRA 学习率，默认 2e-5
   --vision-gradient-checkpointing / --no-vision-gradient-checkpointing
                                   LoRA 训练时对 DINO 重算激活，默认开启
+  --camera-embedding / --no-camera-embedding
+                                  为每路视觉 token 加相机身份，默认开启
   --optimizer-lr LR               学习率，默认 1e-4
   --scheduler-decay-lr LR         cosine 最低学习率，默认 1e-5
   --save-freq N                   checkpoint 保存频率，默认 5000
-  --val-freq N                    validation 频率，默认 2500；0 表示关闭
+  --val-freq N                    validation 频率，默认 1000；0 表示关闭
   --val-batch-size N              validation batch size，默认 8
-  --val-num-frames N              每次 validation 采样帧数，默认 16
+  --val-num-frames N              每次 validation 采样帧数，默认 128
   --seed N                        随机种子，默认 1000
 
 开关:
@@ -81,7 +85,7 @@ usage() {
   --save-checkpoint               保存 checkpoint（默认）
   --no-save-checkpoint            不保存 checkpoint
   --delta-action / --absolute-action
-                                  使用 delta/absolute action，默认 delta
+                                  使用 delta/absolute action，默认 absolute
   -h, --help                      显示帮助
 
 也可以通过同名 DINOFLOW_* 环境变量覆盖默认值。
@@ -119,6 +123,8 @@ while (($# > 0)); do
     --vision-lora-lr) require_value "$1" "${2:-}"; DINOFLOW_VISION_LORA_LR="$2"; shift 2 ;;
     --vision-gradient-checkpointing) DINOFLOW_VISION_GRADIENT_CHECKPOINTING=true; shift ;;
     --no-vision-gradient-checkpointing) DINOFLOW_VISION_GRADIENT_CHECKPOINTING=false; shift ;;
+    --camera-embedding) DINOFLOW_USE_CAMERA_EMBEDDING=true; shift ;;
+    --no-camera-embedding) DINOFLOW_USE_CAMERA_EMBEDDING=false; shift ;;
     --optimizer-lr) require_value "$1" "${2:-}"; DINOFLOW_OPTIMIZER_LR="$2"; shift 2 ;;
     --scheduler-decay-lr) require_value "$1" "${2:-}"; DINOFLOW_SCHEDULER_DECAY_LR="$2"; shift 2 ;;
     --save-freq) require_value "$1" "${2:-}"; DINOFLOW_SAVE_FREQ="$2"; shift 2 ;;
@@ -145,6 +151,10 @@ if [[ ! -d "$DINOFLOW_VAL_DATASET_ROOT" ]]; then
   echo "validation 数据集不存在: $DINOFLOW_VAL_DATASET_ROOT" >&2
   exit 1
 fi
+if [[ ! -d "$DINOFLOW_LEROBOT_ROOT/src/lerobot/datasets" ]]; then
+  echo "找不到共享 LeRobot datasets 源码: $DINOFLOW_LEROBOT_ROOT/src/lerobot/datasets" >&2
+  exit 1
+fi
 if [[ "$DINOFLOW_VISION_ENCODER" = /* && ! -d "$DINOFLOW_VISION_ENCODER" ]]; then
   echo "本地 DINO checkpoint 不存在: $DINOFLOW_VISION_ENCODER" >&2
   exit 1
@@ -162,10 +172,22 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != "$DINOFLOW_CONDA_ENV" ]]; then
   conda activate "$DINOFLOW_CONDA_ENV"
 fi
 
-export PYTHONPATH="$DINOFLOW_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$DINOFLOW_ROOT/src:$DINOFLOW_LEROBOT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-bf16}"
 export PYTHONUNBUFFERED=1
+
+python - <<'PY'
+from lerobot.datasets import EpisodeAwareSampler
+from lerobot.policies.dino_flow.configuration_dino_flow import DinoFlowConfig
+
+config = DinoFlowConfig()
+assert config.hidden_dim == 256
+assert config.action_dim == 26
+assert config.use_delta_action is False
+print(f"LeRobot dataset runtime: {EpisodeAwareSampler.__module__}")
+print("DinoFlow visual baseline config: state=26 action=26 latent=256 absolute=true")
+PY
 
 echo "=========================================="
 echo "DinoFlow phase-1 training"
@@ -197,6 +219,7 @@ exec python -m lerobot.scripts.lerobot_train \
   --policy.vision_lora_dropout "$DINOFLOW_VISION_LORA_DROPOUT" \
   --policy.vision_lora_lr "$DINOFLOW_VISION_LORA_LR" \
   --policy.vision_gradient_checkpointing "$DINOFLOW_VISION_GRADIENT_CHECKPOINTING" \
+  --policy.use_camera_embedding "$DINOFLOW_USE_CAMERA_EMBEDDING" \
   --policy.use_amp true \
   --policy.horizon 50 \
   --policy.n_action_steps 50 \

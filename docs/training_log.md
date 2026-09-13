@@ -1,5 +1,24 @@
 # DinoFlow baseline 工作日志
 
+## 当前实验：纯视觉＋state absolute-action baseline（2026-09-13）
+
+- 分支：`visuo-basline`
+- 目标：建立不使用触觉、腕力和 contact token 的纯视觉＋state 对照基线
+- 数据：`splice_wires_phase1_split_300_21`，train 300 episodes / 137216 frames，validation 21 episodes / 9021 frames
+- 环境：`dinoflow_env`
+- DINOv3：`/home/nolan/models/dinov3-vits16plus`
+- 相机：base `480×768`，左右 wrist `480×832`
+- 视觉：三路共 `4560` 个 patch token，DINO 原生 `384` 维通过共享 `Linear(384,256)` 投影；每路加入可学习相机身份 embedding
+- 动作：物理命令为 26 维，内部 action token latent 为 `256` 维；直接学习归一化 absolute action，`use_delta_action=false`
+- Action DiT：6 层、256 hidden、8 heads；Flow Matching 为 8 步 Euler
+- DINO：Q/V LoRA 微调，rank `8`、alpha `16`、dropout `0`、lr `2e-5`；其余 DINO 权重冻结；gradient checkpointing 开启
+- 优化：Adam，Action DiT lr `1e-4`，weight decay `1e-6`，cosine scheduler 最低 lr `1e-5`，warmup `500` 步，bf16
+- 训练：batch `32`，workers `12`，目标 `30000` steps；每 `1000` steps 验证，每次采样 `128` 帧，每 `5000` steps 保存
+- W&B project：`splice_wires_dinoflow`；建议用包含 `visuo_baseline_absolute_h256` 的 job name 区分此基线
+- smoke test：真实数据 1 step 已通过，DINO Q/V LoRA 已成功加载，训练前向/反向完成
+
+该实验配置是当前文档中的有效 baseline。下面保留此前 512 hidden、delta action 的历史记录，便于追溯，不作为本次比较基线。
+
 ## 实验固定信息
 
 - 分支：`visuo-basline`，基于 `main` commit `7eabb4e`
@@ -11,7 +30,7 @@
 - W&B project：`splice_wires_dinoflow`
 - 权重只保存到 `outputs/`，不上传 W&B artifact
 
-## 当前 baseline
+## 历史 baseline（已归档）
 
 - Head：`480×768`；每路 wrist：原图 `480×848` 左右各裁 `8px`，得到 `480×832`
 - DINO patch tokens：Head `1440`，每路 wrist `1560`，三路拼接 `4560`

@@ -31,7 +31,14 @@ are gated behind optional extras::
     pip install 'lerobot[all]'           # everything
 """
 
+from pkgutil import extend_path
+
 from lerobot.__version__ import __version__
+
+# This repository carries the DinoFlow overlay while the shared LeRobot
+# runtime (including datasets/) remains in the checked-out openpi LeRobot
+# source tree. Allow Python to discover both trees under the lerobot package.
+__path__ = extend_path(__path__, __name__)
 
 # Maps optional extras to the CLI entry-points they unlock.
 available_extras: dict[str, list[str]] = {

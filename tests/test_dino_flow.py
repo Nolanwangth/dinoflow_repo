@@ -29,6 +29,11 @@ def test_dino_flow_config_defaults_are_valid_without_dataset_features():
 def test_default_camera_targets_preserve_wrist_width():
     config = DinoFlowConfig()
 
+    assert config.use_delta_action is False
+    assert config.hidden_dim == 256
+    assert config.action_dim == 26
+    assert config.vision_encoder_dim == 384
+    assert config.use_camera_embedding is True
     assert config.image_resize_shapes["observation.images.base_0_rgb"] == (480, 768)
     assert config.image_resize_shapes["observation.images.left_wrist_0_rgb"] == (480, 832)
     assert config.image_resize_shapes["observation.images.right_wrist_0_rgb"] == (480, 832)
@@ -81,3 +86,11 @@ def test_rtc_prefix_weights_fade_to_zero():
     weights = DinoFlowPolicy._rtc_prefix_weights(6, 1, 4, "cpu", torch.float32)
 
     torch.testing.assert_close(weights, torch.tensor([1.0, 1.0, 0.5, 0.0, 0.0, 0.0]))
+
+
+def test_rtc_prefix_weights_ignore_unavailable_previous_chunk_tail():
+    weights = DinoFlowPolicy._rtc_prefix_weights(
+        6, 0, 5, "cpu", torch.float32, available_length=2
+    )
+
+    torch.testing.assert_close(weights, torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]))

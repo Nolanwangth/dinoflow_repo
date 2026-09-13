@@ -32,7 +32,13 @@ class DinoFlowConfig(PreTrainedConfig):
     vision_lora_dropout: float = 0.0
     vision_lora_lr: float = 2e-5
     vision_gradient_checkpointing: bool = True
-    hidden_dim: int = 512
+    # Shared policy latent width after projecting DINO's native 384-d features.
+    # The physical robot action remains ``action_dim`` (26 joints); 256 is the
+    # internal visual/action-token width, not the command dimensionality.
+    hidden_dim: int = 256
+
+    # Keep camera identity after concatenating the three camera token streams.
+    use_camera_embedding: bool = True
 
     # Keep the head at 480x768 and preserve the wrist horizontal field of view
     # with a 480x832 target.  The preprocessing resizes to target height and
@@ -58,11 +64,10 @@ class DinoFlowConfig(PreTrainedConfig):
     clip_sample: bool = True
     clip_sample_range: float = 1.0
 
-    # Regress on delta = action_norm - state_norm instead of absolute action_norm.
-    # The first chunk step is then ~0 (action == current pose for a smooth task),
-    # which is far better conditioned than predicting absolute joint angles and
-    # directly anchors the executed first step to the observed state.
-    use_delta_action: bool = True
+    # Regress directly on normalized absolute actions. This branch is the
+    # absolute-action comparison baseline; delta remains an opt-in mode for
+    # compatibility with old runs.
+    use_delta_action: bool = False
 
     # Non-zero floor for the cosine decay so the run doesn't starve LR to ~0
     # (the diffusers "cosine" preset decays all the way to zero).
